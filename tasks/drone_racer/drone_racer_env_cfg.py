@@ -59,8 +59,8 @@ class DroneRacerSceneCfg(InteractiveSceneCfg):
         offset=TiledCameraCfg.OffsetCfg(pos=(0.14, 0.0, 0.05), rot=(1.0, 0.0, 0.0, 0.0), convention="world"),
         data_types=["rgb"],
         spawn=sim_utils.FisheyeCameraCfg(),
-        width=1000,
-        height=1000,
+        width=64,
+        height=64,
     )
 
     # lights
@@ -83,7 +83,20 @@ class ObservationsCfg:
 
     @configclass
     class PolicyCfg(ObsGroup):
-        """Observations for policy group."""
+        """Actor observations: FPV camera (flattened grayscale) + IMU.
+        These are the only observations available at deployment — no ground truth."""
+
+        image = ObsTerm(func=mdp.flat_image)
+        imu_ang_vel = ObsTerm(func=mdp.imu_ang_vel)
+        imu_att = ObsTerm(func=mdp.imu_orientation)
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True  # flat vector: 64*64 + 3 + 4 = 4103
+
+    @configclass
+    class CriticCfg(ObsGroup):
+        """Critic observations: privileged ground-truth state used only during training."""
 
         position = ObsTerm(func=mdp.root_pos_w)
         attitude = ObsTerm(func=mdp.root_quat_w)
@@ -94,20 +107,7 @@ class ObservationsCfg:
 
         def __post_init__(self) -> None:
             self.enable_corruption = False
-            self.concatenate_terms = True
-
-    @configclass
-    class CriticCfg(ObsGroup):
-        """Observations for critic group."""
-
-        image = ObsTerm(func=mdp.image)
-        imu_ang_vel = ObsTerm(func=mdp.imu_ang_vel)
-        imu_lin_acc = ObsTerm(func=mdp.imu_lin_acc)
-        imu_att = ObsTerm(func=mdp.imu_orientation)
-
-        def __post_init__(self) -> None:
-            self.enable_corruption = False
-            self.concatenate_terms = False
+            self.concatenate_terms = True  # flat vector: 20-dim
 
     # observation groups
     policy: PolicyCfg = PolicyCfg()
@@ -192,6 +192,29 @@ class TerminationsCfg:
 
 
 @configclass
+class NoCamObservationsCfg:
+    """Observation specs for the ground-truth-only (no camera) variant."""
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        """Actor observations: full privileged ground-truth state (20-dim)."""
+
+        position = ObsTerm(func=mdp.root_pos_w)
+        attitude = ObsTerm(func=mdp.root_quat_w)
+        lin_vel = ObsTerm(func=mdp.root_lin_vel_b)
+        ang_vel = ObsTerm(func=mdp.root_ang_vel_b)
+        target_pos_b = ObsTerm(func=mdp.target_pos_b, params={"command_name": "target"})
+        actions = ObsTerm(func=mdp.last_action)
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True  # flat vector: 3+4+3+3+3+4 = 20-dim
+
+    policy: PolicyCfg = PolicyCfg()
+    critic: None = None  # shared network reads the same OBSERVATIONS
+
+
+@configclass
 class DroneRacerEnvCfg(ManagerBasedRLEnvCfg):
     # Scene settings
     scene: DroneRacerSceneCfg = DroneRacerSceneCfg(num_envs=4096, env_spacing=0.0)
@@ -207,12 +230,7 @@ class DroneRacerEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self) -> None:
         """Post initialization."""
 
-        # Disable IMU and Tiled Camera
-        self.scene.imu = None
-        self.scene.tiled_camera = None
-
         # MDP settings
-        self.observations.critic = None
         self.events.reset_base = None
         self.commands.target.randomise_start = True
 
@@ -243,11 +261,7 @@ class DroneRacerEnvCfg_PLAY(ManagerBasedRLEnvCfg):
     def __post_init__(self) -> None:
         """Post initialization."""
 
-        # Disable IMU and Tiled Camera
-        self.scene.imu = None
-        self.scene.tiled_camera = None
-
-        # MDP settings
+        # Critic obs not needed at inference
         self.observations.critic = None
 
         # Disable push robot events
@@ -263,5 +277,58 @@ class DroneRacerEnvCfg_PLAY(ManagerBasedRLEnvCfg):
         self.viewer.eye = (-10.0, -10.0, 10.0)
         self.viewer.lookat = (0.0, 0.0, 0.0)
         # simulation settings
+        self.sim.dt = 1 / 400
+        self.sim.render_interval = self.decimation
+
+
+@configclass
+class DroneRacerEnvCfg_NoCam(ManagerBasedRLEnvCfg):
+    """Training variant: ground-truth state for both actor and critic — no camera."""
+
+    scene: DroneRacerSceneCfg = DroneRacerSceneCfg(num_envs=4096, env_spacing=0.0)
+    observations: NoCamObservationsCfg = NoCamObservationsCfg()
+    actions: ActionsCfg = ActionsCfg()
+    commands: CommandsCfg = CommandsCfg()
+    events: EventCfg = EventCfg()
+    rewards: RewardsCfg = RewardsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
+
+    def __post_init__(self) -> None:
+        self.events.reset_base = None
+        self.commands.target.randomise_start = True
+
+        # camera not needed — disable to save GPU memory and simulation time
+        self.scene.tiled_camera = None
+
+        self.decimation = 4
+        self.episode_length_s = 20
+        self.viewer.eye = (-10.0, -10.0, 10.0)
+        self.viewer.lookat = (0.0, 0.0, 0.0)
+        self.sim.dt = 1 / 400
+        self.sim.render_interval = self.decimation
+
+
+@configclass
+class DroneRacerEnvCfg_NoCam_PLAY(ManagerBasedRLEnvCfg):
+    """Play/inference variant: ground-truth state, no camera."""
+
+    scene: DroneRacerSceneCfg = DroneRacerSceneCfg(num_envs=4096, env_spacing=0.0)
+    observations: NoCamObservationsCfg = NoCamObservationsCfg()
+    actions: ActionsCfg = ActionsCfg()
+    commands: CommandsCfg = CommandsCfg()
+    events: EventCfg = EventCfg()
+    rewards: RewardsCfg = RewardsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
+
+    def __post_init__(self) -> None:
+        self.events.push_robot = None
+
+        # camera not needed
+        self.scene.tiled_camera = None
+
+        self.decimation = 4
+        self.episode_length_s = 20
+        self.viewer.eye = (-10.0, -10.0, 10.0)
+        self.viewer.lookat = (0.0, 0.0, 0.0)
         self.sim.dt = 1 / 400
         self.sim.render_interval = self.decimation

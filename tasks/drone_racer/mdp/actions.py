@@ -106,7 +106,7 @@ class ControlAction(ActionTerm):
     def apply_actions(self):
         self._thrust[:, 0, 2] = self._processed_actions[:, 0]
         self._moment[:, 0, :] = self._processed_actions[:, 1:]
-        self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
+        self._robot.permanent_wrench_composer.set_forces_and_torques(self._thrust, self._moment, body_ids=self._body_id)
 
         self._elapsed_time += self._env.physics_dt
         log(self._env, ["time"], self._elapsed_time)

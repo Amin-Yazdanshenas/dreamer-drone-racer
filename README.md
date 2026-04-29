@@ -4,7 +4,8 @@
 
 # Isaac Drone Racer
 
-[![IsaacSim](https://img.shields.io/badge/IsaacSim-4.5.0-silver.svg)](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
+[![IsaacSim](https://img.shields.io/badge/IsaacSim-5.1-silver.svg)](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
+[![IsaacLab](https://img.shields.io/badge/IsaacLab-2.3.2-silver.svg)](https://isaac-sim.github.io/IsaacLab/)
 [![Python](https://img.shields.io/badge/python-3.10-blue.svg)](https://docs.python.org/3/whatsnew/3.10.html)
 [![pre-commit](https://img.shields.io/github/actions/workflow/status/isaac-sim/IsaacLab/pre-commit.yaml?logo=pre-commit&logoColor=white&label=pre-commit&color=brightgreen)](https://github.com/kousheekc/isaac_drone_racer/blob/master/.github/workflows/pre-commit.yaml)
 [![License](https://img.shields.io/badge/license-BSD--3-yellow.svg)](https://opensource.org/licenses/BSD-3-Clause)
@@ -26,13 +27,18 @@ Key highlights of the Isaac Drone Racer project:
 5. **Track Generator** — Dynamically generate custom race tracks.
 6. **Logger and Plotter** — Integrated tools for monitoring and visualizing flight behavior.
 
-## Requirements
-This framework has been tested on x64 based Linux systems, specifically Ubuntu 22.04. But it should also work on Windows 10/11.
-
 ### Prerequisites
 - Workstation capable of running Isaac Sim (see [link](https://github.com/isaac-sim/IsaacSim?tab=readme-ov-file#prerequisites-and-environment-setup))
 - [Git](https://git-scm.com/downloads) & [Git LFS](https://git-lfs.com)
 - [Conda](https://www.anaconda.com/docs/getting-started/miniconda/install) for local installation or [Docker](https://docs.docker.com/engine/install/ubuntu/) with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+
+## Requirements
+This project has been developed and tested with:
+
+- **Isaac Sim 5.1**
+- **Isaac Lab 2.3.2**
+- **Python 3.10**
+- **Ubuntu 22.04 (x64)**
 
 ## Setup
 1. Follow the [Isaac Lab pip installation instructions](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/pip_installation.html), with the following modifications:
@@ -41,10 +47,10 @@ This framework has been tested on x64 based Linux systems, specifically Ubuntu 2
 git clone git@github.com:isaac-sim/IsaacLab.git
 ```
 
-- Checkout the `v2.1.0` release tag:
+- Checkout the `v2.3.2` release tag:
 ```bash
 cd IsaacLab
-git checkout v2.1.0
+git checkout v2.3.2
 ```
 
 2. Clone Isaac Drone Racer:
@@ -59,37 +65,53 @@ pip3 install -e .
 ```
 
 ## Usage
-The drone racing task is registered as a standard Gym environment with the ID: `Isaac-Drone-Racer-v0`. Training and evaluation are powered by the [skrl](https://github.com/Toni-SM/skrl) library.
+Tasks are registered as standard Gym environments and training/evaluation are powered by the [skrl](https://github.com/Toni-SM/skrl) library. Two training modes are available:
 
-### Training a Policy
+| Mode | Task IDs | Actor input | Critic input |
+|------|----------|-------------|--------------|
+| **Asymmetric actor-critic** (camera) | `Isaac-Drone-Racer-v0` / `Isaac-Drone-Racer-Play-v0` | FPV camera (64×64 grayscale) + IMU | Privileged ground-truth state |
+| **Ground-truth only** (no camera) | `Isaac-Drone-Racer-NoCam-v0` / `Isaac-Drone-Racer-NoCam-Play-v0` | Full ground-truth state | Same as actor |
 
-To train a policy, run the following command from the root of the `isaac_drone_racer` repository. This will launch the simulation in headless mode with 4096 agents running parallelly.
+### Asymmetric Actor-Critic (Camera + IMU)
 
-```bash
-python3 scripts/rl/train.py --task Isaac-Drone-Racer-v0 --headless --num_envs 4096
-```
-
-> [!NOTE]
->    You can pass additional CLI arguments supported by the [AppLauncher](https://isaac-sim.github.io/IsaacLab/main/source/tutorials/00_sim/launch_app.html). Additionally since IsaacLab supports the [Hydra Configuration System](https://isaac-sim.github.io/IsaacLab/main/source/features/hydra.html), task specific parameters can be adjusted from CLI.
->    For example, to disable the motor model during training:
->   ```bash
->   python3 scripts/rl/train.py --task Isaac-Drone-Racer-v0 --headless --num_envs 4096 env.actions.control_action.use_motor_model=False
->   ```
-
-### Playing Back a Trained Policy
-To run a trained policy in the simulator:
+This mode trains a deployable policy that uses only onboard sensors (FPV camera + IMU) at inference time. During training, the critic has access to privileged ground-truth state to produce better value estimates — a technique known as asymmetric actor-critic. Because every environment renders a 64×64 camera frame each step, this mode is significantly more GPU-intensive.
 
 ```bash
+# Train
+python3 scripts/rl/train.py --task Isaac-Drone-Racer-v0 --headless --num_envs 512
+
+# Play
 python3 scripts/rl/play.py --task Isaac-Drone-Racer-Play-v0 --num_envs 1
 ```
 
-This will launch a single agent with the latest checkpoint and play the trained policy in the racing environment. All the same CLI and Hydra configuration options used during training are supported here as well.
+Checkpoints are saved under `logs/skrl/drone_racer/`.
+
+### Ground-Truth Only (No Camera)
+
+This mode uses the full simulator state (position, orientation, velocity, target direction) as observations for both actor and critic. The camera is disabled entirely, making this much faster to train — suitable for rapid iteration on reward shaping, dynamics tuning, or controller design.
+
+```bash
+# Train
+python3 scripts/rl/train.py --task Isaac-Drone-Racer-NoCam-v0 --headless --num_envs 4096
+
+# Play
+python3 scripts/rl/play.py --task Isaac-Drone-Racer-NoCam-Play-v0 --num_envs 1
+```
+
+Checkpoints are saved under `logs/skrl/drone_racer_nocam/`.
+
+> [!NOTE]
+> You can pass additional CLI arguments supported by the [AppLauncher](https://isaac-sim.github.io/IsaacLab/main/source/tutorials/00_sim/launch_app.html). Additionally since IsaacLab supports the [Hydra Configuration System](https://isaac-sim.github.io/IsaacLab/main/source/features/hydra.html), task-specific parameters can be adjusted from CLI.
+> For example, to disable the motor model during training:
+> ```bash
+> python3 scripts/rl/train.py --task Isaac-Drone-Racer-NoCam-v0 --headless --num_envs 4096 env.actions.control_action.use_motor_model=False
+> ```
 
 ## Next Steps
 
 - [ ] **Data-driven aerodynamic model pipeline** - integrate tools for data driven system identification, calibration and include the learned aerodynamic forces into the simulation environment.
 - [ ] **Power consumption model**  - incorporate a detailed power model that accounts for battery discharge based on current draw.
-- [ ] **Policy learning using onboard sensors** - explore and implement methods to transition away from full-state observations by instead using only onboard sensor data (e.g camera + IMU).
+- [x] **Policy learning using onboard sensors** - asymmetric actor-critic training with FPV camera + IMU actor and privileged ground-truth critic.
 
 
 ## Troubleshooting

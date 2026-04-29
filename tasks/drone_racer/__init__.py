@@ -29,3 +29,24 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg.yaml",
     },
 )
+
+# Ground-truth-only variants (no camera, faster training)
+gym.register(
+    id="Isaac-Drone-Racer-NoCam-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_NoCam",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_nocam.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Drone-Racer-NoCam-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_NoCam_PLAY",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_nocam.yaml",
+    },
+)

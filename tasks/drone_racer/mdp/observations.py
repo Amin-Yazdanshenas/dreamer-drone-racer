@@ -14,11 +14,23 @@ import isaaclab.utils.math as math_utils
 import torch
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import TiledCamera
 
 from utils.logger import log
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+
+
+def flat_image(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg = SceneEntityCfg("tiled_camera")) -> torch.Tensor:
+    """FPV camera image converted to grayscale and flattened to a 1-D vector per env.
+
+    Returns shape (num_envs, H*W). Values are normalised to [0, 1].
+    """
+    camera: TiledCamera = env.scene[sensor_cfg.name]
+    rgb = camera.data.output["rgb"]  # (N, H, W, 3), float32 in [0, 1]
+    gray = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]  # (N, H, W)
+    return gray.reshape(env.num_envs, -1)  # (N, H*W)
 
 
 def root_lin_vel_b(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:

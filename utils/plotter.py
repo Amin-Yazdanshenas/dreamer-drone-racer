@@ -12,7 +12,13 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import scienceplots  # noqa: F401
+try:
+    import scienceplots  # noqa: F401
+
+    _SCIENCEPLOTS_AVAILABLE = True
+except ModuleNotFoundError:
+    _SCIENCEPLOTS_AVAILABLE = False
+
 from scipy.spatial.transform import Rotation as R
 
 
@@ -31,7 +37,8 @@ def generate_plots(log_directory: str):  # noqa: C901
     plot_rotors_ang_vel = False
     plot_actions = False
 
-    plt.style.use(["science", "ieee", "bright", "no-latex"])
+    if _SCIENCEPLOTS_AVAILABLE:
+        plt.style.use(["science", "ieee", "bright", "no-latex"])
     matplotlib.rcParams.update({"font.size": 6})
 
     # check if the log directory exists
