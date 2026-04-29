@@ -67,3 +67,7 @@ _build
 
 # Teleop Recorded Dataset
 datasets
+.vscode/browse.vc.db
+.vscode/*.db
+.vscode/*.db-shm
+.vscode/*.db-wal
