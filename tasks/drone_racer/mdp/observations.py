@@ -22,6 +22,51 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
+_GATE_LABEL_TO_CLASS_ID: dict[str, int] = {}
+
+
+def gate_mask(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("tiled_camera"),
+    command_name: str = "target",
+) -> torch.Tensor:
+    """Binary mask of the current target gate only.
+
+    Returns (N, H*W) float32: 1.0 = target gate pixel, 0.0 = everything else.
+    Requires colorize_semantic_segmentation=False (RGBA bytes = raw uint32 class ID).
+    Each gate has a unique semantic label (gate_1, gate_2, …); per-env filtering by
+    next_gate_idx selects only the gate the drone should fly through next.
+    """
+    camera: TiledCamera = env.scene[sensor_cfg.name]
+    seg = camera.data.output["semantic_segmentation"]  # (N, H, W, 4) uint8
+
+    global _GATE_LABEL_TO_CLASS_ID
+    if not _GATE_LABEL_TO_CLASS_ID:
+        info = camera.data.info.get("semantic_segmentation", {})
+        id_to_labels = info.get("idToLabels", {})
+        if id_to_labels:
+            _GATE_LABEL_TO_CLASS_ID = {
+                v["class"]: int(k)
+                for k, v in id_to_labels.items()
+                if isinstance(v, dict) and "class" in v
+            }
+
+    target_idx = env.command_manager.get_term(command_name).next_gate_idx  # (N,) int32
+
+    if _GATE_LABEL_TO_CLASS_ID:
+        class_ids = torch.tensor(
+            [_GATE_LABEL_TO_CLASS_ID.get(f"gate_{int(i.item()) + 1}", int(i.item()) + 1) for i in target_idx],
+            dtype=seg.dtype,
+            device=seg.device,
+        )
+    else:
+        # Fallback: gate_N registered in insertion order → class ID N (1-indexed)
+        class_ids = (target_idx + 1).to(dtype=seg.dtype)
+
+    mask = (seg[..., 0] == class_ids[:, None, None]).float()  # (N, H, W)
+    return mask.reshape(env.num_envs, -1)
+
+
 def flat_image(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg = SceneEntityCfg("tiled_camera")) -> torch.Tensor:
     """FPV camera image converted to grayscale and flattened to a 1-D vector per env.
 

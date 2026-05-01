@@ -57,8 +57,9 @@ class DroneRacerSceneCfg(InteractiveSceneCfg):
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/body/camera",
         offset=TiledCameraCfg.OffsetCfg(pos=(0.14, 0.0, 0.05), rot=(1.0, 0.0, 0.0, 0.0), convention="world"),
-        data_types=["rgb"],
-        spawn=sim_utils.FisheyeCameraCfg(),
+        data_types=["semantic_segmentation"],
+        colorize_semantic_segmentation=False,
+        spawn=sim_utils.PinholeCameraCfg(),
         width=64,
         height=64,
     )
@@ -86,13 +87,13 @@ class ObservationsCfg:
         """Actor observations: FPV camera (flattened grayscale) + IMU.
         These are the only observations available at deployment — no ground truth."""
 
-        image = ObsTerm(func=mdp.flat_image)
+        image = ObsTerm(func=mdp.gate_mask)
         imu_ang_vel = ObsTerm(func=mdp.imu_ang_vel)
         imu_att = ObsTerm(func=mdp.imu_orientation)
 
         def __post_init__(self) -> None:
             self.enable_corruption = False
-            self.concatenate_terms = True  # flat vector: 64*64 + 3 + 4 = 4103
+            self.concatenate_terms = True  # flat vector: 64*64 (target gate mask) + 3 + 4 = 4103
 
     @configclass
     class CriticCfg(ObsGroup):
@@ -248,7 +249,7 @@ class DroneRacerEnvCfg(ManagerBasedRLEnvCfg):
 @configclass
 class DroneRacerEnvCfg_PLAY(ManagerBasedRLEnvCfg):
     # Scene settings
-    scene: DroneRacerSceneCfg = DroneRacerSceneCfg(num_envs=4096, env_spacing=0.0)
+    scene: DroneRacerSceneCfg = DroneRacerSceneCfg(num_envs=1, env_spacing=0.0)
     # MDP settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
@@ -261,11 +262,11 @@ class DroneRacerEnvCfg_PLAY(ManagerBasedRLEnvCfg):
     def __post_init__(self) -> None:
         """Post initialization."""
 
-        # Critic obs not needed at inference
-        self.observations.critic = None
-
         # Disable push robot events
         self.events.push_robot = None
+
+        # Enable RGB alongside segmentation so the FPV visualization window can show both
+        self.scene.tiled_camera.data_types = ["rgb", "semantic_segmentation"]
 
         # Enable recording fpv footage
         # self.commands.target.record_fpv = True
@@ -312,7 +313,7 @@ class DroneRacerEnvCfg_NoCam(ManagerBasedRLEnvCfg):
 class DroneRacerEnvCfg_NoCam_PLAY(ManagerBasedRLEnvCfg):
     """Play/inference variant: ground-truth state, no camera."""
 
-    scene: DroneRacerSceneCfg = DroneRacerSceneCfg(num_envs=4096, env_spacing=0.0)
+    scene: DroneRacerSceneCfg = DroneRacerSceneCfg(num_envs=1, env_spacing=0.0)
     observations: NoCamObservationsCfg = NoCamObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()

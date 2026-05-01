@@ -54,6 +54,16 @@ sys.argv = [sys.argv[0]] + hydra_args
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
+# Before scene/camera: 64×64 FPV violates DLSS minimum; raster-only saves VRAM vs RTX path.
+try:
+    import carb
+
+    _s = carb.settings.get_settings()
+    _s.set("/rtx/post/dlss/execMode", 0)
+    _s.set("/rtx/rendermode", "RasterOnly")
+except Exception:
+    pass
+
 """Rest everything follows."""
 
 import os
@@ -178,7 +188,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # configure and instantiate the skrl runner
     # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
-    runner = Runner(env, agent_cfg)
+    from tasks.drone_racer.agents.cam_runner import CAM_TASKS, CamRunner
+
+    if args_cli.task in CAM_TASKS:
+        runner = CamRunner(env, agent_cfg)
+    else:
+        runner = Runner(env, agent_cfg)
 
     # load checkpoint (if specified)
     if resume_path:

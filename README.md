@@ -41,6 +41,28 @@ This project has been developed and tested with:
 - **Ubuntu 22.04 (x64)**
 
 ## Setup
+
+### Option A — Restore the exact conda environment (recommended)
+
+An exported conda environment is provided in [environment.yml](environment.yml). This installs Isaac Sim 5.1, Isaac Lab 2.3.2, and all other pinned dependencies in one step, without needing to follow the upstream Isaac Lab installation guide manually.
+
+```bash
+# 1. Clone this repository
+git clone https://github.com/Amin-Yazdanshenas/isaac_drone_racer.git
+cd isaac_drone_racer
+
+# 2. Create the conda environment from the lockfile (~10–20 min, downloads ~10 GB)
+conda env create -f environment.yml
+
+# 3. Activate it
+conda activate isaacsim
+
+# 4. Install the project modules in editable mode
+pip3 install -e .
+```
+
+### Option B — Manual installation
+
 1. Follow the [Isaac Lab pip installation instructions](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/pip_installation.html), with the following modifications:
 - After cloning the Isaac Lab repository:
 ```bash
@@ -55,7 +77,7 @@ git checkout v2.3.2
 
 2. Clone Isaac Drone Racer:
 ```bash
-git clone https://github.com/kousheekc/isaac_drone_racer.git
+git clone https://github.com/Amin-Yazdanshenas/isaac_drone_racer.git
 ```
 
 3. Install the modules in editable mode
@@ -78,10 +100,13 @@ This mode trains a deployable policy that uses only onboard sensors (FPV camera 
 
 ```bash
 # Train
-python3 scripts/rl/train.py --task Isaac-Drone-Racer-v0 --headless --num_envs 512
+python3 scripts/rl/train.py --task Isaac-Drone-Racer-v0 --headless --enable_cameras --num_envs 512
 
-# Play
-python3 scripts/rl/play.py --task Isaac-Drone-Racer-Play-v0 --num_envs 1
+# Play (GUI mode — requires ≥ 8 GB VRAM)
+python3 scripts/rl/play.py --task Isaac-Drone-Racer-Play-v0 --enable_cameras --num_envs 1
+
+# Play (headless — works on ≤ 6 GB VRAM; OpenCV debug window shows RGB + gate mask)
+python3 scripts/rl/play.py --task Isaac-Drone-Racer-Play-v0 --enable_cameras --headless --num_envs 1
 ```
 
 Checkpoints are saved under `logs/skrl/drone_racer/`.
@@ -121,6 +146,19 @@ conda activate env_isaaclab
 ```
 - When launching Isaac Sim for the first time, it may take a significant amount of time to load (potentially 10 minutes). This is normal, please be patient.
 
+### GPU VRAM requirements (GUI mode)
+
+Isaac Sim 5.1 loads the full RTX renderer stack at startup when running in GUI mode (without `--headless`). This pre-allocates roughly 4–5 GB of VRAM for ray-tracing buffers, BVH acceleration structures, and the viewport framebuffer — before any simulation or PyTorch code runs. On GPUs with 6 GB or less (e.g. RTX 3060 Laptop), this exhausts all available VRAM and causes a `CUDA error: CUBLAS_STATUS_ALLOC_FAILED` crash during environment creation.
+
+**Workaround: always use `--headless` on GPUs with ≤ 6 GB VRAM.** The tiled camera still renders correctly in headless mode. A debug visualization window (RGB + target gate mask overlay) is shown via OpenCV when `--enable_cameras` is set:
+
+```bash
+# Camera task — headless required on ≤ 6 GB GPUs
+python3 scripts/rl/play.py --task Isaac-Drone-Racer-Play-v0 --enable_cameras --headless --num_envs 1
+```
+
+GUI mode (no `--headless`) requires a GPU with **≥ 8 GB VRAM**.
+
 ## Acknowledgement
 
 - **Kaufmann, E., Bauersfeld, L., Loquercio, A., Müller, M., Koltun, V., & Scaramuzza, D.** (2023).
@@ -141,6 +179,6 @@ This project is licensed under the BSD 3-Clause License - see the [LICENSE](http
 ## Contact
 Kousheek Chakraborty - kousheekc@gmail.com
 
-Project Link: [https://github.com/kousheekc/isaac_drone_racer](https://github.com/kousheekc/isaac_drone_racer)
+Project Link: [https://github.com/Amin-Yazdanshenas/isaac_drone_racer](https://github.com/Amin-Yazdanshenas/isaac_drone_racer)
 
 If you encounter any difficulties, feel free to reach out through the Issues section. If you find any bugs or have improvements to suggest, don't hesitate to make a pull request.
