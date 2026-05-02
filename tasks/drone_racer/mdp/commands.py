@@ -67,6 +67,9 @@ class GateTargetingCommand(CommandTerm):
         self._gate_passed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.next_gate_idx = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
         self.next_gate_w = torch.zeros(self.num_envs, 7, device=self.device)
+        # per-episode counters (reset in _resample_command, incremented in _update_command)
+        self._gates_passed_episode = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+        self._laps_completed_episode = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
 
     def __str__(self) -> str:
         msg = "GateTargetingCommand:\n"
@@ -103,7 +106,10 @@ class GateTargetingCommand(CommandTerm):
     """
 
     def _update_metrics(self):
-        pass
+        episode = self._env.extras.setdefault("episode", {})
+        episode["Episode/gates_per_episode"] = self._gates_passed_episode.float().mean()
+        episode["Episode/laps_per_episode"] = self._laps_completed_episode.float().mean()
+        episode["Episode/success_rate"] = (self._laps_completed_episode > 0).float().mean()
 
     def _resample_command(self, env_ids: Sequence[int]):
         # Release and reinitialize video writer only after the first iteration
@@ -114,6 +120,9 @@ class GateTargetingCommand(CommandTerm):
 
         if self.cfg.record_fpv:
             self.out = cv2.VideoWriter(f"fpv_{self.video_id}.mp4", self.fourcc, 100, (1000, 1000))
+
+        self._gates_passed_episode[env_ids] = 0
+        self._laps_completed_episode[env_ids] = 0
 
         if self.cfg.randomise_start is None:
             self.next_gate_idx[env_ids] = 0
@@ -182,6 +191,11 @@ class GateTargetingCommand(CommandTerm):
         self._gate_missed = passed_gate_plane & (
             torch.any(torch.abs(self.robot.data.root_pos_w - self.next_gate_w[:, :3]) > (self.gate_size / 2), dim=1)
         )
+
+        # Update per-episode counters (check last gate before index wraps)
+        lap_completed = self._gate_passed & (self.next_gate_idx == self.num_gates - 1)
+        self._gates_passed_episode += self._gate_passed.int()
+        self._laps_completed_episode += lap_completed.int()
 
         # Update next gate target for the envs that passed the gate
         self.next_gate_idx[self._gate_passed] += 1
