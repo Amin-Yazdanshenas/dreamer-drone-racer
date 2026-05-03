@@ -324,8 +324,8 @@ class DroneRacerEnvCfg_NoCam_PLAY(ManagerBasedRLEnvCfg):
     def __post_init__(self) -> None:
         self.events.push_robot = None
 
-        # camera not needed
-        self.scene.tiled_camera = None
+        # Enable RGB + segmentation for FPV debug window (visualization only — not used as policy observations)
+        self.scene.tiled_camera.data_types = ["rgb", "semantic_segmentation"]
 
         self.decimation = 4
         self.episode_length_s = 20
