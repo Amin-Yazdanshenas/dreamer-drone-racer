@@ -17,9 +17,9 @@ class CNNPolicy(GaussianMixin, Model):
         Conv(16→32, 3×3, s=2) → 16×16
         Conv(32→64, 3×3, s=2) → 8×8
         Conv(64→64, 3×3, s=2) → 4×4  → flatten → 1024
-        Linear(1024→64)
-        cat(image_feat[64], imu[7]) → 71
-        Linear(71→256) → Linear(256→256) → Linear(256→actions)
+        Linear(1024→256)
+        cat(image_feat[256], imu[7]) → 263
+        Linear(263→256) → Linear(256→256) → Linear(256→actions)
     """
 
     def __init__(
@@ -50,10 +50,10 @@ class CNNPolicy(GaussianMixin, Model):
         )
         cnn_flat = 64 * 4 * 4  # 1024
 
-        self.cnn_proj = nn.Sequential(nn.Linear(cnn_flat, 64), nn.ELU())
+        self.cnn_proj = nn.Sequential(nn.Linear(cnn_flat, 256), nn.ELU())
 
         self.mlp = nn.Sequential(
-            nn.Linear(64 + IMU_DIM, 256),
+            nn.Linear(256 + IMU_DIM, 256),
             nn.ELU(),
             nn.Linear(256, 256),
             nn.ELU(),
