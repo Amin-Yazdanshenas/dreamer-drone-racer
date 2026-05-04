@@ -114,7 +114,6 @@ dependencies:
       - ipython==9.13.0
       - ipython-pygments-lexers==1.1.1
       - ipywidgets==8.1.5
-      - isaac-drone-racer==0.1.0
       - isaaclab==2.3.2.post1
       - isaaclab-assets==0.2.4
       - isaaclab-contrib==0.0.2
