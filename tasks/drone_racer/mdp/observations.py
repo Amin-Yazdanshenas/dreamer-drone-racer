@@ -24,6 +24,15 @@ if TYPE_CHECKING:
 
 _GATE_LABEL_TO_CLASS_ID: dict[str, int] = {}
 
+# Frame-stacking buffer for gate_perception_features — keyed by id(env)
+_PERC_BUFFER: dict[int, torch.Tensor] = {}
+
+# Pinhole constants for 64×64 camera with default PinholeCameraCfg
+# fx = focal_length_mm / horizontal_aperture_mm * width_px = 24.0 / 20.955 * 64
+_FX_PIXELS: float = 73.3
+_GATE_REAL_WIDTH_M: float = 1.5
+_DIST_MAX_M: float = 20.0
+
 
 def gate_mask(
     env: ManagerBasedRLEnv,
@@ -65,6 +74,123 @@ def gate_mask(
 
     mask = (seg[..., 0] == class_ids[:, None, None]).float()  # (N, H, W)
     return mask.reshape(env.num_envs, -1)
+
+
+def gate_perception_features(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("tiled_camera"),
+    command_name: str = "target",
+    num_frames: int = 1,
+    seg_noise_prob: float = 0.0,
+) -> torch.Tensor:
+    """Compact 9-dim gate geometry features extracted from the semantic segmentation mask.
+
+    Per frame (9 features):
+      [0] visible         — 1.0 if any mask pixel nonzero, else 0.0
+      [1] centroid_x      — pixel-weighted col mean, normalized to [-1, 1]
+      [2] centroid_y      — pixel-weighted row mean, normalized to [-1, 1]
+      [3] bbox_xmin       — leftmost active col, normalized to [-1, 1]
+      [4] bbox_ymin       — topmost active row, normalized to [-1, 1]
+      [5] bbox_xmax       — rightmost active col, normalized to [-1, 1]
+      [6] bbox_ymax       — bottommost active row, normalized to [-1, 1]
+      [7] area_norm       — active_pixels / (H*W), in [0, 1]
+      [8] dist_approx_norm — pinhole distance estimate, normalized to [0, 1]
+
+    Returns (N, 9*num_frames). When num_frames > 1, oldest frame is first.
+    seg_noise_prob: per-env probability of dropping the entire mask each step.
+    """
+    camera: TiledCamera = env.scene[sensor_cfg.name]
+    seg = camera.data.output["semantic_segmentation"]  # (N, H, W, 4) uint8
+    N, H, W, _ = seg.shape
+    device = seg.device
+
+    global _GATE_LABEL_TO_CLASS_ID
+    if not _GATE_LABEL_TO_CLASS_ID:
+        info = camera.data.info.get("semantic_segmentation", {})
+        id_to_labels = info.get("idToLabels", {})
+        if id_to_labels:
+            _GATE_LABEL_TO_CLASS_ID = {
+                v["class"]: int(k)
+                for k, v in id_to_labels.items()
+                if isinstance(v, dict) and "class" in v
+            }
+
+    target_idx = env.command_manager.get_term(command_name).next_gate_idx  # (N,) int32
+
+    if _GATE_LABEL_TO_CLASS_ID:
+        class_ids = torch.tensor(
+            [_GATE_LABEL_TO_CLASS_ID.get(f"gate_{int(i.item()) + 1}", int(i.item()) + 1) for i in target_idx],
+            dtype=seg.dtype,
+            device=device,
+        )
+    else:
+        class_ids = (target_idx + 1).to(dtype=seg.dtype)
+
+    mask = (seg[..., 0] == class_ids[:, None, None]).float()  # (N, H, W)
+
+    if seg_noise_prob > 0.0:
+        drop = (torch.rand(N, device=device) < seg_noise_prob).float()
+        mask = mask * (1.0 - drop[:, None, None])
+
+    # Coordinate grids: pixel 0 → -1.0, pixel W-1 → +1.0
+    col_coords = torch.linspace(-1.0, 1.0, W, device=device)
+    row_coords = torch.linspace(-1.0, 1.0, H, device=device)
+    col_grid = col_coords[None, None, :].expand(N, H, W)
+    row_grid = row_coords[None, :, None].expand(N, H, W)
+
+    pixel_count = mask.sum(dim=(1, 2))              # (N,)
+    safe_count = pixel_count.clamp(min=1.0)
+    visible = (pixel_count > 0).float()             # (N,)
+    zero = torch.zeros(N, device=device)
+
+    # Weighted centroid (zeroed automatically when mask=0)
+    centroid_x = (mask * col_grid).sum(dim=(1, 2)) / safe_count
+    centroid_y = (mask * row_grid).sum(dim=(1, 2)) / safe_count
+
+    # Bounding box: fill non-gate pixels with sentinel values
+    col_min_fill = torch.where(mask.bool(), col_grid, torch.ones_like(col_grid))
+    row_min_fill = torch.where(mask.bool(), row_grid, torch.ones_like(row_grid))
+    col_max_fill = torch.where(mask.bool(), col_grid, -torch.ones_like(col_grid))
+    row_max_fill = torch.where(mask.bool(), row_grid, -torch.ones_like(row_grid))
+
+    bbox_xmin = col_min_fill.reshape(N, -1).min(dim=1).values
+    bbox_ymin = row_min_fill.reshape(N, -1).min(dim=1).values
+    bbox_xmax = col_max_fill.reshape(N, -1).max(dim=1).values
+    bbox_ymax = row_max_fill.reshape(N, -1).max(dim=1).values
+
+    has_gate = visible.bool()
+    bbox_xmin = torch.where(has_gate, bbox_xmin, zero)
+    bbox_ymin = torch.where(has_gate, bbox_ymin, zero)
+    bbox_xmax = torch.where(has_gate, bbox_xmax, zero)
+    bbox_ymax = torch.where(has_gate, bbox_ymax, zero)
+
+    area_norm = pixel_count / float(H * W)
+
+    # Distance estimate via pinhole model: dist = (real_width * fx) / apparent_width_px
+    bbox_width_px = (bbox_xmax - bbox_xmin).clamp(min=0.0) * (W / 2.0)
+    dist_approx = (_GATE_REAL_WIDTH_M * _FX_PIXELS) / bbox_width_px.clamp(min=1.0)
+    dist_approx_norm = (dist_approx / _DIST_MAX_M).clamp(0.0, 1.0) * visible
+
+    log(env, ["gate_visible"], visible.unsqueeze(1))
+    log(env, ["gate_centroid_x"], centroid_x.unsqueeze(1))
+    log(env, ["gate_centroid_y"], centroid_y.unsqueeze(1))
+    log(env, ["gate_dist_approx"], (dist_approx_norm * _DIST_MAX_M).unsqueeze(1))
+
+    feat = torch.stack(
+        [visible, centroid_x, centroid_y, bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, area_norm, dist_approx_norm],
+        dim=1,
+    )  # (N, 9)
+
+    if num_frames <= 1:
+        return feat
+
+    # Frame stacking: maintain rolling buffer of last num_frames observations
+    env_id = id(env)
+    if env_id not in _PERC_BUFFER or _PERC_BUFFER[env_id].shape != (N, 9 * num_frames):
+        _PERC_BUFFER[env_id] = feat.repeat(1, num_frames)
+    buf = torch.cat([_PERC_BUFFER[env_id][:, 9:], feat], dim=1)
+    _PERC_BUFFER[env_id] = buf
+    return buf  # (N, 9*num_frames)
 
 
 def flat_image(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg = SceneEntityCfg("tiled_camera")) -> torch.Tensor:

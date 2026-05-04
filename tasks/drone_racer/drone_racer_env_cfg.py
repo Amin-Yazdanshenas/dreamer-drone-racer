@@ -333,3 +333,172 @@ class DroneRacerEnvCfg_NoCam_PLAY(ManagerBasedRLEnvCfg):
         self.viewer.lookat = (0.0, 0.0, 0.0)
         self.sim.dt = 1 / 400
         self.sim.render_interval = self.decimation
+
+
+# ============================================================
+# MonoRace observation configs
+# ============================================================
+
+
+@configclass
+class MonoRaceObservationsCfg:
+    """Observation specs for MonoRace: compact gate perception features + drone state.
+
+    Policy (actor): 9-dim gate perception + 17-dim state = 26-dim total.
+    Critic: privileged ground-truth state (same as ObservationsCfg.CriticCfg, 20-dim).
+    """
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        """26-dim actor observations: gate geometry (9) + lin_vel(3) + ang_vel(3) + quat(4) + action(4) + target(3)."""
+
+        gate_perc = ObsTerm(
+            func=mdp.gate_perception_features,
+            params={"command_name": "target", "num_frames": 1, "seg_noise_prob": 0.0},
+        )
+        lin_vel = ObsTerm(func=mdp.root_lin_vel_b)
+        ang_vel = ObsTerm(func=mdp.root_ang_vel_b)
+        attitude = ObsTerm(func=mdp.root_quat_w)
+        actions = ObsTerm(func=mdp.last_action)
+        target_pos = ObsTerm(func=mdp.target_pos_b, params={"command_name": "target"})
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True  # 9 + 3 + 3 + 4 + 4 + 3 = 26-dim
+
+    @configclass
+    class CriticCfg(ObsGroup):
+        """20-dim critic observations: privileged ground-truth state (same as ObservationsCfg.CriticCfg)."""
+
+        position = ObsTerm(func=mdp.root_pos_w)
+        attitude = ObsTerm(func=mdp.root_quat_w)
+        lin_vel = ObsTerm(func=mdp.root_lin_vel_b)
+        ang_vel = ObsTerm(func=mdp.root_ang_vel_b)
+        target_pos_b = ObsTerm(func=mdp.target_pos_b, params={"command_name": "target"})
+        actions = ObsTerm(func=mdp.last_action)
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True  # 3 + 4 + 3 + 3 + 3 + 4 = 20-dim
+
+    policy: PolicyCfg = PolicyCfg()
+    critic: CriticCfg = CriticCfg()
+
+
+@configclass
+class MonoRaceObsFrameStackCfg:
+    """Observation specs for MonoRace with K=3 frame stacking: 27 + 17 = 44-dim policy obs."""
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        """44-dim actor observations: 3×gate perception (27) + state (17)."""
+
+        gate_perc = ObsTerm(
+            func=mdp.gate_perception_features,
+            params={"command_name": "target", "num_frames": 3, "seg_noise_prob": 0.0},
+        )
+        lin_vel = ObsTerm(func=mdp.root_lin_vel_b)
+        ang_vel = ObsTerm(func=mdp.root_ang_vel_b)
+        attitude = ObsTerm(func=mdp.root_quat_w)
+        actions = ObsTerm(func=mdp.last_action)
+        target_pos = ObsTerm(func=mdp.target_pos_b, params={"command_name": "target"})
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True  # 27 + 3 + 3 + 4 + 4 + 3 = 44-dim
+
+    @configclass
+    class CriticCfg(ObsGroup):
+        """20-dim critic observations: same as MonoRaceObservationsCfg.CriticCfg."""
+
+        position = ObsTerm(func=mdp.root_pos_w)
+        attitude = ObsTerm(func=mdp.root_quat_w)
+        lin_vel = ObsTerm(func=mdp.root_lin_vel_b)
+        ang_vel = ObsTerm(func=mdp.root_ang_vel_b)
+        target_pos_b = ObsTerm(func=mdp.target_pos_b, params={"command_name": "target"})
+        actions = ObsTerm(func=mdp.last_action)
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True  # 20-dim
+
+    policy: PolicyCfg = PolicyCfg()
+    critic: CriticCfg = CriticCfg()
+
+
+# ============================================================
+# MonoRace reward config
+# ============================================================
+
+
+@configclass
+class MonoRaceRewardsCfg(RewardsCfg):
+    """Enhanced rewards for MonoRace: inherits base rewards, adds velocity alignment, smoothness, gate offset."""
+
+    velocity_alignment = RewTerm(
+        func=mdp.velocity_alignment,
+        weight=0.2,
+        params={"command_name": "target", "std": 0.5},
+    )
+    action_smoothness = RewTerm(
+        func=mdp.action_smoothness,
+        weight=-0.001,
+        params={},
+    )
+    gate_offset_penalty = RewTerm(
+        func=mdp.gate_offset_penalty,
+        weight=-0.5,
+        params={"command_name": "target", "near_plane_dist": 1.5},
+    )
+
+
+# ============================================================
+# MonoRace env configs (training + play)
+# ============================================================
+
+
+@configclass
+class DroneRacerEnvCfg_MonoRace(ManagerBasedRLEnvCfg):
+    """Training variant: MonoRace perception pipeline, asymmetric AC, 512 envs (camera constraint)."""
+
+    scene: DroneRacerSceneCfg = DroneRacerSceneCfg(num_envs=512, env_spacing=0.0)
+    observations: MonoRaceObservationsCfg = MonoRaceObservationsCfg()
+    actions: ActionsCfg = ActionsCfg()
+    commands: CommandsCfg = CommandsCfg()
+    events: EventCfg = EventCfg()
+    rewards: MonoRaceRewardsCfg = MonoRaceRewardsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
+
+    def __post_init__(self) -> None:
+        self.events.reset_base = None
+        self.commands.target.randomise_start = True
+        self.decimation = 4
+        self.episode_length_s = 20
+        self.viewer.eye = (-10.0, -10.0, 10.0)
+        self.viewer.lookat = (0.0, 0.0, 0.0)
+        self.sim.dt = 1 / 400
+        self.sim.render_interval = self.decimation
+
+
+@configclass
+class DroneRacerEnvCfg_MonoRace_PLAY(ManagerBasedRLEnvCfg):
+    """Inference variant: 1 env, RGB + segmentation for FPV visualization."""
+
+    scene: DroneRacerSceneCfg = DroneRacerSceneCfg(num_envs=1, env_spacing=0.0)
+    observations: MonoRaceObservationsCfg = MonoRaceObservationsCfg()
+    actions: ActionsCfg = ActionsCfg()
+    commands: CommandsCfg = CommandsCfg()
+    events: EventCfg = EventCfg()
+    rewards: MonoRaceRewardsCfg = MonoRaceRewardsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
+
+    def __post_init__(self) -> None:
+        self.events.push_robot = None
+        # Enable RGB alongside segmentation for FPV debug window
+        self.scene.tiled_camera.data_types = ["rgb", "semantic_segmentation"]
+        self.decimation = 4
+        self.episode_length_s = 20
+        self.viewer.eye = (-10.0, -10.0, 10.0)
+        self.viewer.lookat = (0.0, 0.0, 0.0)
+        self.sim.dt = 1 / 400
+        self.sim.render_interval = self.decimation

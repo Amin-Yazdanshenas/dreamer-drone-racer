@@ -50,3 +50,24 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_nocam.yaml",
     },
 )
+
+# MonoRace perception pipeline variants (camera required for seg mask; compact state policy)
+gym.register(
+    id="Isaac-Drone-Racer-MonoRace-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_MonoRace",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_monorace.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Drone-Racer-MonoRace-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_MonoRace_PLAY",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_monorace.yaml",
+    },
+)

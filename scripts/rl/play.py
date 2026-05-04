@@ -262,9 +262,11 @@ def main():
     experiment_cfg["agent"]["experiment"]["write_interval"] = 0  # don't log to TensorBoard
     experiment_cfg["agent"]["experiment"]["checkpoint_interval"] = 0  # don't generate checkpoints
 
-    from tasks.drone_racer.agents.cam_runner import CAM_TASKS, CamRunner
+    from tasks.drone_racer.agents.cam_runner import CAM_TASKS, MONORACE_TASKS, CamRunner, MonoRaceRunner
 
-    if args_cli.task in CAM_TASKS:
+    if args_cli.task in MONORACE_TASKS:
+        runner = MonoRaceRunner(env, experiment_cfg)
+    elif args_cli.task in CAM_TASKS:
         runner = CamRunner(env, experiment_cfg)
     else:
         runner = Runner(env, experiment_cfg)
