@@ -502,3 +502,83 @@ class DroneRacerEnvCfg_MonoRace_PLAY(ManagerBasedRLEnvCfg):
         self.viewer.lookat = (0.0, 0.0, 0.0)
         self.sim.dt = 1 / 400
         self.sim.render_interval = self.decimation
+
+
+# ============================================================
+# DreamerV3 env configs
+# ============================================================
+
+
+@configclass
+class DreamerObservationsCfg:
+    """Observations for DreamerV3 training.
+
+    PolicyCfg contains only the 10-dim kinematics state vector.
+    Image data is extracted directly from the scene by DreamerIsaacEnvWrapper —
+    NOT through the Isaac Lab observation manager — so no image ObsTerm is defined here.
+    No CriticCfg: DreamerV3 does not use asymmetric actor-critic.
+    """
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        ang_vel = ObsTerm(func=mdp.root_ang_vel_b)
+        attitude = ObsTerm(func=mdp.root_quat_w)
+        target_pos = ObsTerm(func=mdp.target_pos_b, params={"command_name": "target"})
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
+    policy: PolicyCfg = PolicyCfg()
+
+
+@configclass
+class DroneRacerEnvCfg_Dreamer(ManagerBasedRLEnvCfg):
+    """DreamerV3 training variant: 32 envs, RGB + semantic segmentation enabled.
+
+    32 envs is a conservative default for 6 GB VRAM when both RGB rendering
+    and segmentation are active simultaneously.
+    """
+
+    scene: DroneRacerSceneCfg = DroneRacerSceneCfg(num_envs=32, env_spacing=0.0)
+    observations: DreamerObservationsCfg = DreamerObservationsCfg()
+    actions: ActionsCfg = ActionsCfg()
+    commands: CommandsCfg = CommandsCfg()
+    events: EventCfg = EventCfg()
+    rewards: RewardsCfg = RewardsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
+
+    def __post_init__(self) -> None:
+        self.events.reset_base = None
+        self.commands.target.randomise_start = True
+        # Both RGB and segmentation must be available for all three obs modes
+        self.scene.tiled_camera.data_types = ["rgb", "semantic_segmentation"]
+        self.decimation = 4
+        self.episode_length_s = 20
+        self.viewer.eye = (-10.0, -10.0, 10.0)
+        self.viewer.lookat = (0.0, 0.0, 0.0)
+        self.sim.dt = 1 / 400
+        self.sim.render_interval = self.decimation
+
+
+@configclass
+class DroneRacerEnvCfg_Dreamer_PLAY(ManagerBasedRLEnvCfg):
+    """DreamerV3 evaluation variant: 1 env."""
+
+    scene: DroneRacerSceneCfg = DroneRacerSceneCfg(num_envs=1, env_spacing=0.0)
+    observations: DreamerObservationsCfg = DreamerObservationsCfg()
+    actions: ActionsCfg = ActionsCfg()
+    commands: CommandsCfg = CommandsCfg()
+    events: EventCfg = EventCfg()
+    rewards: RewardsCfg = RewardsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
+
+    def __post_init__(self) -> None:
+        self.events.push_robot = None
+        self.scene.tiled_camera.data_types = ["rgb", "semantic_segmentation"]
+        self.decimation = 4
+        self.episode_length_s = 20
+        self.viewer.eye = (-10.0, -10.0, 10.0)
+        self.viewer.lookat = (0.0, 0.0, 0.0)
+        self.sim.dt = 1 / 400
+        self.sim.render_interval = self.decimation

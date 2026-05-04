@@ -1,0 +1,3 @@
+# DreamerV3 — RGB observation mode (3-channel, closest to Dream to Fly paper)
+obs_mode: rgb
+image_channels: 3

@@ -1,0 +1,3 @@
+# DreamerV3 — RGB + binary gate mask observation mode (4-channel)
+obs_mode: rgb_mask
+image_channels: 4

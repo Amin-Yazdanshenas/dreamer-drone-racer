@@ -1,0 +1,3 @@
+# DreamerV3 — binary gate mask observation mode (1-channel)
+obs_mode: mask
+image_channels: 1

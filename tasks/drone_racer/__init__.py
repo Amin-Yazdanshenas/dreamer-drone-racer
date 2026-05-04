@@ -71,3 +71,40 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_monorace.yaml",
     },
 )
+
+# DreamerV3 variants (camera required; train_dreamer.py / evaluate_dreamer.py handle agent setup)
+gym.register(
+    id="Isaac-Drone-Racer-Dreamer-RGB-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_Dreamer",
+    },
+)
+
+gym.register(
+    id="Isaac-Drone-Racer-Dreamer-Mask-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_Dreamer",
+    },
+)
+
+gym.register(
+    id="Isaac-Drone-Racer-Dreamer-RGBMask-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_Dreamer",
+    },
+)
+
+gym.register(
+    id="Isaac-Drone-Racer-Dreamer-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_Dreamer_PLAY",
+    },
+)

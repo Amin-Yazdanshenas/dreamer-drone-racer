@@ -1,0 +1,44 @@
+# DreamerV3 base configuration — shared defaults for all obs modes.
+# Scaled for RTX 3060 6 GB VRAM.  Override per obs mode in dreamer_rgb/mask/rgb_mask.yaml.
+
+obs_mode: rgb
+image_channels: 3       # overridden per yaml
+state_dim: 10           # ang_vel(3) + quat(4) + target_pos_b(3)
+action_dim: 4
+
+# RSSM
+h_dim: 512              # recurrent state dim (paper: 2048)
+z_cats: 32              # number of categorical variables
+z_classes: 32           # classes per variable  → latent = h_dim + z_cats*z_classes = 1536
+mlp_dim: 256            # hidden dim for all MLPs (paper: 768)
+cnn_depth: 32           # base CNN channel count
+
+# World model loss coefficients
+beta_pred: 1.0
+beta_dyn: 1.0
+beta_rep: 0.1
+
+# Actor-critic
+horizon: 15             # imagination rollout length
+gamma: 0.997
+lam: 0.95
+entropy_scale: 3.0e-4
+target_critic_ema: 0.98
+
+# Training
+seq_len: 16             # sequence length per replay sample
+batch_size: 16          # number of sequences per gradient step
+lr_world: 1.0e-4
+lr_actor: 3.0e-5
+lr_critic: 3.0e-5
+grad_clip: 100.0
+warmup_steps: 1000      # random action warmup before learning starts
+update_every: 1         # gradient updates per env step
+n_grad_steps: 1
+
+# Replay buffer
+replay_capacity: 500000
+
+# Logging / checkpointing
+log_interval: 100
+save_interval: 10000

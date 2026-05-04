@@ -26,6 +26,7 @@ Key highlights of the Isaac Drone Racer project:
 4. **Onboard Sensor Suite** — Includes simulated fisheye camera, IMU and collision detection.
 5. **Track Generator** — Dynamically generate custom race tracks.
 6. **Logger and Plotter** — Integrated tools for monitoring and visualizing flight behavior.
+7. **Multiple RL training modes** — PPO (asymmetric AC, MonoRace compact state) and DreamerV3 world-model RL, all coexisting without conflict.
 
 ### Prerequisites
 - Workstation capable of running Isaac Sim (see [link](https://github.com/isaac-sim/IsaacSim?tab=readme-ov-file#prerequisites-and-environment-setup))
@@ -87,33 +88,37 @@ pip3 install -e .
 ```
 
 ## Usage
-Tasks are registered as standard Gym environments and training/evaluation are powered by the [skrl](https://github.com/Toni-SM/skrl) library. Two training modes are available:
 
-| Mode | Task IDs | Actor input | Critic input |
-|------|----------|-------------|--------------|
-| **Asymmetric actor-critic** (camera) | `Isaac-Drone-Racer-v0` / `Isaac-Drone-Racer-Play-v0` | FPV camera (64×64 grayscale) + IMU | Privileged ground-truth state |
-| **Ground-truth only** (no camera) | `Isaac-Drone-Racer-NoCam-v0` / `Isaac-Drone-Racer-NoCam-Play-v0` | Full ground-truth state | Same as actor |
+Tasks are registered as standard Gym environments. Three distinct RL training approaches are available:
 
-### Asymmetric Actor-Critic (Camera + IMU)
+| Mode | Algorithm | Task IDs | Actor input | Notes |
+|------|-----------|----------|-------------|-------|
+| **Asymmetric AC** (camera) | PPO via skrl | `Isaac-Drone-Racer-v0` / `-Play-v0` | FPV 64×64 grayscale + IMU | Privileged GT critic |
+| **Ground-truth only** | PPO via skrl | `Isaac-Drone-Racer-NoCam-v0` / `-NoCam-Play-v0` | Full GT state | Fastest; no camera |
+| **MonoRace** (compact perception) | PPO via skrl | `Isaac-Drone-Racer-MonoRace-v0` / `-MonoRace-Play-v0` | 9-dim gate geometry + IMU | Inspired by MAVLab 2025 |
+| **DreamerV3** (world model) | DreamerV3 | `Isaac-Drone-Racer-Dreamer-{RGB,Mask,RGBMask}-v0` / `-Dreamer-Play-v0` | Raw 64×64 image (RGB / mask / both) | Separate train/eval scripts |
 
-This mode trains a deployable policy that uses only onboard sensors (FPV camera + IMU) at inference time. During training, the critic has access to privileged ground-truth state to produce better value estimates — a technique known as asymmetric actor-critic. Because every environment renders a 64×64 camera frame each step, this mode is significantly more GPU-intensive.
+---
+
+### PPO — Asymmetric Actor-Critic (Camera + IMU)
+
+Trains a deployable policy using only onboard sensors (FPV camera + IMU). The critic sees privileged ground-truth state during training only.
 
 ```bash
 # Train
 python3 scripts/rl/train.py --task Isaac-Drone-Racer-v0 --headless --enable_cameras --num_envs 512
 
-# Play (GUI mode — requires ≥ 8 GB VRAM)
-python3 scripts/rl/play.py --task Isaac-Drone-Racer-Play-v0 --enable_cameras --num_envs 1
-
-# Play (headless — works on ≤ 6 GB VRAM; OpenCV debug window shows RGB + gate mask)
+# Play (headless — works on ≤ 6 GB VRAM; OpenCV window shows RGB + gate mask)
 python3 scripts/rl/play.py --task Isaac-Drone-Racer-Play-v0 --enable_cameras --headless --num_envs 1
 ```
 
-Checkpoints are saved under `logs/skrl/drone_racer/`.
+Checkpoints: `logs/skrl/drone_racer/`
 
-### Ground-Truth Only (No Camera)
+---
 
-This mode uses the full simulator state (position, orientation, velocity, target direction) as observations for both actor and critic. The camera is disabled entirely, making this much faster to train — suitable for rapid iteration on reward shaping, dynamics tuning, or controller design.
+### PPO — Ground-Truth Only (No Camera)
+
+Full simulator state as observations; camera disabled. Best for rapid iteration on rewards/dynamics.
 
 ```bash
 # Train
@@ -123,7 +128,85 @@ python3 scripts/rl/train.py --task Isaac-Drone-Racer-NoCam-v0 --headless --num_e
 python3 scripts/rl/play.py --task Isaac-Drone-Racer-NoCam-Play-v0 --num_envs 1
 ```
 
-Checkpoints are saved under `logs/skrl/drone_racer_nocam/`.
+Checkpoints: `logs/skrl/drone_racer_nocam/`
+
+---
+
+### PPO — MonoRace Compact Perception
+
+Inspired by the MAVLab 2025 MonoRace approach. Extracts 9 compact geometric features from the semantic segmentation mask (centroid, bounding box, area, pinhole distance estimate) and combines them with drone dynamics into a 26-dim state fed to a lightweight 37K-parameter MLP policy. More sample-efficient than raw pixel input.
+
+```bash
+# Train (512 envs — camera-constrained on 6 GB VRAM)
+python3 scripts/rl/train.py --task Isaac-Drone-Racer-MonoRace-v0 --headless --enable_cameras --num_envs 512
+
+# Play
+python3 scripts/rl/play.py --task Isaac-Drone-Racer-MonoRace-Play-v0 --enable_cameras --headless --num_envs 1
+```
+
+Checkpoints: `logs/skrl/drone_racer_monorace/`
+
+---
+
+### DreamerV3 — World-Model RL
+
+Inspired by [Dream to Fly (Romero et al., 2025)](https://arxiv.org/abs/2501.14377). A self-contained PyTorch DreamerV3 implementation learns a world model (RSSM) from 64×64 images, then trains an actor-critic entirely on *imagined* rollouts inside that world model. No skrl dependency — uses separate `train_dreamer.py` / `evaluate_dreamer.py` scripts.
+
+**Three observation modes:**
+
+| `--obs_mode` | Task ID | Image input | Channels |
+|-------------|---------|-------------|---------|
+| `rgb` | `Isaac-Drone-Racer-Dreamer-RGB-v0` | Raw RGB | 3 |
+| `mask` | `Isaac-Drone-Racer-Dreamer-Mask-v0` | Binary gate mask | 1 |
+| `rgb_mask` | `Isaac-Drone-Racer-Dreamer-RGBMask-v0` | RGB + gate mask | 4 |
+
+All modes additionally receive a 10-dim kinematics state vector (ang_vel, quaternion, target gate position in body frame) through a separate MLP encoder fused into the RSSM.
+
+```bash
+# Train — RGB (closest to the Dream to Fly paper)
+python3 scripts/rl/train_dreamer.py \
+    --task Isaac-Drone-Racer-Dreamer-RGB-v0 \
+    --obs_mode rgb --num_envs 32 --max_steps 2000000 \
+    --headless --enable_cameras
+
+# Train — binary gate mask only
+python3 scripts/rl/train_dreamer.py \
+    --task Isaac-Drone-Racer-Dreamer-Mask-v0 \
+    --obs_mode mask --num_envs 32 --max_steps 2000000 \
+    --headless --enable_cameras
+
+# Train — RGB + mask (4-channel)
+python3 scripts/rl/train_dreamer.py \
+    --task Isaac-Drone-Racer-Dreamer-RGBMask-v0 \
+    --obs_mode rgb_mask --num_envs 32 --max_steps 2000000 \
+    --headless --enable_cameras
+
+# Resume from checkpoint
+python3 scripts/rl/train_dreamer.py \
+    --task Isaac-Drone-Racer-Dreamer-RGB-v0 \
+    --obs_mode rgb \
+    --checkpoint logs/dreamer/rgb/<run>/checkpoints/agent_latest.pt \
+    --headless --enable_cameras
+
+# Evaluate / play (deterministic rollouts, saves eval_results.csv)
+python3 scripts/rl/evaluate_dreamer.py \
+    --task Isaac-Drone-Racer-Dreamer-Play-v0 \
+    --obs_mode rgb \
+    --checkpoint logs/dreamer/rgb/<run>/checkpoints/agent_latest.pt \
+    --num_episodes 10 --headless --enable_cameras
+
+# Monitor training
+tensorboard --logdir logs/dreamer
+```
+
+Checkpoints: `logs/dreamer/<obs_mode>/<timestamp>/checkpoints/`
+
+**Architecture (scaled for 6 GB VRAM):**
+- RSSM: 512-dim recurrent state, 32×32 categorical stochastic latent
+- All MLPs: 256 hidden units, 4 layers, LayerNorm + SiLU
+- Imagination horizon: 15 steps
+- Replay buffer: 500 K steps
+- Warmup: 1 000 random steps before learning begins
 
 > [!NOTE]
 > You can pass additional CLI arguments supported by the [AppLauncher](https://isaac-sim.github.io/IsaacLab/main/source/tutorials/00_sim/launch_app.html). Additionally since IsaacLab supports the [Hydra Configuration System](https://isaac-sim.github.io/IsaacLab/main/source/features/hydra.html), task-specific parameters can be adjusted from CLI.
@@ -134,9 +217,13 @@ Checkpoints are saved under `logs/skrl/drone_racer_nocam/`.
 
 ## Next Steps
 
-- [ ] **Data-driven aerodynamic model pipeline** - integrate tools for data driven system identification, calibration and include the learned aerodynamic forces into the simulation environment.
-- [ ] **Power consumption model**  - incorporate a detailed power model that accounts for battery discharge based on current draw.
-- [x] **Policy learning using onboard sensors** - asymmetric actor-critic training with FPV camera + IMU actor and privileged ground-truth critic.
+- [ ] **Data-driven aerodynamic model pipeline** — integrate tools for data-driven system identification, calibration and include learned aerodynamic forces into the simulation environment.
+- [ ] **Power consumption model** — incorporate a detailed power model that accounts for battery discharge based on current draw.
+- [x] **Policy learning using onboard sensors** — asymmetric actor-critic training with FPV camera + IMU actor and privileged ground-truth critic.
+- [x] **MonoRace compact perception** — compact gate geometry features (centroid, bbox, distance) replacing raw pixel input; ~37K-parameter MLP policy.
+- [x] **DreamerV3 world-model RL** — self-contained PyTorch DreamerV3 with RGB / mask / RGB+mask observation modes; learns from imagined rollouts inside a learned world model.
+- [ ] **Curriculum learning** — staged difficulty ramp (gate spacing, speed targets) for faster convergence.
+- [ ] **Sim-to-real transfer** — domain randomisation of motor dynamics, aerodynamics, and camera noise for physical hardware deployment.
 
 
 ## Troubleshooting
@@ -172,6 +259,14 @@ GUI mode (no `--headless`) requires a GPU with **≥ 8 GB VRAM**.
 - **Ferede, R., De Wagter, C., Izzo, D., & de Croon, G. C. H. E.** (2024).
   *End-to-end Reinforcement Learning for Time-Optimal Quadcopter Flight*.
   [https://doi.org/10.1109/ICRA57147.2024.10611665](https://doi.org/10.1109/ICRA57147.2024.10611665)
+
+- **Romero, A., Shenai, A., Geles, I., Aljalbout, E., & Scaramuzza, D.** (2025).
+  *Dream to Fly: Model-Based Reinforcement Learning for Vision-Based Drone Flight*.
+  [arXiv:2501.14377](https://arxiv.org/abs/2501.14377)
+
+- **Hafner, D., Lillicrap, T., Norouzi, M., & Ba, J.** (2023).
+  *Mastering Diverse Domains through World Models (DreamerV3)*.
+  [arXiv:2301.04104](https://arxiv.org/abs/2301.04104)
 
 ## License
 This project is licensed under the BSD 3-Clause License - see the [LICENSE](https://github.com/kousheekc/isaac_drone_racer/blob/master/LICENSE) file for details.

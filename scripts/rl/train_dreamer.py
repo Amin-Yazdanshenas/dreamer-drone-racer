@@ -1,0 +1,228 @@
+# Copyright (c) 2025, Kousheek Chakraborty / Amin Yazdanshenas
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Train a DreamerV3 agent on the Isaac Lab drone racing environment.
+
+Usage examples:
+    # RGB observations (closest to Dream to Fly paper)
+    python3 scripts/rl/train_dreamer.py \\
+        --task Isaac-Drone-Racer-Dreamer-RGB-v0 \\
+        --obs_mode rgb --num_envs 32 --max_steps 2000000 \\
+        --headless --enable_cameras
+
+    # Binary segmentation mask only
+    python3 scripts/rl/train_dreamer.py \\
+        --task Isaac-Drone-Racer-Dreamer-Mask-v0 \\
+        --obs_mode mask --num_envs 32 --max_steps 2000000 \\
+        --headless --enable_cameras
+
+    # RGB + mask (4-channel)
+    python3 scripts/rl/train_dreamer.py \\
+        --task Isaac-Drone-Racer-Dreamer-RGBMask-v0 \\
+        --obs_mode rgb_mask --num_envs 32 --max_steps 2000000 \\
+        --headless --enable_cameras
+
+    # Resume from checkpoint
+    python3 scripts/rl/train_dreamer.py \\
+        --task Isaac-Drone-Racer-Dreamer-RGB-v0 \\
+        --obs_mode rgb \\
+        --checkpoint logs/dreamer/rgb/<run>/checkpoints/agent_latest.pt \\
+        --headless --enable_cameras
+"""
+
+import argparse
+
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser(description="Train a DreamerV3 agent.")
+parser.add_argument("--task", type=str, required=True, help="Gym task ID.")
+parser.add_argument(
+    "--obs_mode", type=str, default="rgb", choices=["rgb", "mask", "rgb_mask"],
+    help="Observation mode for DreamerV3 image encoder."
+)
+parser.add_argument("--num_envs", type=int, default=None, help="Override number of envs.")
+parser.add_argument("--max_steps", type=int, default=2_000_000, help="Total env steps.")
+parser.add_argument("--checkpoint", type=str, default=None, help="Resume from .pt file.")
+parser.add_argument("--config", type=str, default=None,
+                    help="Path to dreamer YAML config (default: auto from obs_mode).")
+parser.add_argument("--seed", type=int, default=42)
+
+AppLauncher.add_app_launcher_args(parser)
+args_cli = parser.parse_args()
+args_cli.enable_cameras = True  # always required for RGB/seg
+
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+# Belt-and-suspenders DLSS / raster-only
+try:
+    import carb
+    _s = carb.settings.get_settings()
+    _s.set("/rtx/post/dlss/execMode", 0)
+    _s.set("/rtx/rendermode", "RasterOnly")
+except Exception:
+    pass
+
+"""Rest follows after Isaac Sim init."""
+
+import os
+import random
+from datetime import datetime
+
+import gymnasium as gym
+import torch
+from torch.utils.tensorboard import SummaryWriter
+
+import isaaclab_tasks  # noqa: F401
+from isaaclab_tasks.utils import parse_env_cfg
+
+import tasks  # noqa: F401
+from dreamer import DreamerConfig, DreamerIsaacEnvWrapper, DreamerV3Agent
+from dreamer.replay_buffer import SequenceReplayBuffer
+
+_OBS_MODE_TO_CONFIG = {
+    "rgb": "dreamer/configs/dreamer_rgb.yaml",
+    "mask": "dreamer/configs/dreamer_mask.yaml",
+    "rgb_mask": "dreamer/configs/dreamer_rgb_mask.yaml",
+}
+
+
+def _load_config(args) -> DreamerConfig:
+    """Load base config, overlay obs-mode config, then apply CLI overrides."""
+    import yaml
+
+    base_path = "dreamer/configs/dreamer_base.yaml"
+    mode_path = args.config or _OBS_MODE_TO_CONFIG[args.obs_mode]
+
+    with open(base_path) as f:
+        base = yaml.safe_load(f)
+    with open(mode_path) as f:
+        override = yaml.safe_load(f)
+
+    merged = {**base, **override}
+    cfg = DreamerConfig()
+    for k, v in merged.items():
+        if hasattr(cfg, k):
+            setattr(cfg, k, v)
+
+    cfg.obs_mode = args.obs_mode
+    cfg.__post_init__()   # recompute image_channels from obs_mode
+    return cfg
+
+
+def main():
+    torch.manual_seed(args_cli.seed)
+    random.seed(args_cli.seed)
+
+    cfg = _load_config(args_cli)
+
+    # ----------------------------------------------------------------
+    # Environment
+    # ----------------------------------------------------------------
+    env_cfg = parse_env_cfg(
+        args_cli.task,
+        device=args_cli.device,
+        num_envs=args_cli.num_envs,
+        use_fabric=True,
+    )
+    gym_env = gym.make(args_cli.task, cfg=env_cfg)
+    env = DreamerIsaacEnvWrapper(gym_env, obs_mode=args_cli.obs_mode)
+
+    device = args_cli.device or "cuda"
+
+    # ----------------------------------------------------------------
+    # Agent & replay buffer
+    # ----------------------------------------------------------------
+    agent = DreamerV3Agent(cfg, device=device)
+    replay = SequenceReplayBuffer(
+        capacity=cfg.replay_capacity,
+        seq_len=cfg.seq_len,
+        num_envs=env.num_envs,
+        device=device,
+    )
+
+    if args_cli.checkpoint:
+        agent.load(args_cli.checkpoint)
+        print(f"[DreamerV3] Resumed from {args_cli.checkpoint}")
+
+    # ----------------------------------------------------------------
+    # Logging
+    # ----------------------------------------------------------------
+    run_tag = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_dir = os.path.abspath(os.path.join("logs", "dreamer", args_cli.obs_mode, run_tag))
+    ckpt_dir = os.path.join(log_dir, "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir=os.path.join(log_dir, "tensorboard"))
+    print(f"[DreamerV3] Logging to {log_dir}")
+
+    # ----------------------------------------------------------------
+    # Training loop
+    # ----------------------------------------------------------------
+    obs = env.reset()
+    agent.reset_carry(env.num_envs)
+    agent.train_mode()
+
+    step = agent._step
+    ep_rewards = torch.zeros(env.num_envs)
+    ep_gates = torch.zeros(env.num_envs, dtype=torch.float32)
+    ep_lengths = torch.zeros(env.num_envs, dtype=torch.float32)
+    ep_count = 0
+
+    while step < args_cli.max_steps:
+        # --- Collect ---
+        with torch.no_grad():
+            actions = agent.act(obs)
+
+        next_obs = env.step(actions.cpu())
+
+        replay.add(
+            obs,
+            actions.cpu(),
+            next_obs["reward"],
+            next_obs["is_first"],
+            next_obs["is_last"],
+        )
+
+        # Episode tracking
+        ep_rewards += next_obs["reward"]
+        ep_lengths += 1.0
+        done_mask = next_obs["is_last"]
+        if done_mask.any():
+            for i in done_mask.nonzero(as_tuple=True)[0]:
+                writer.add_scalar("env/episode_reward", ep_rewards[i].item(), step)
+                writer.add_scalar("env/episode_length", ep_lengths[i].item(), step)
+                ep_rewards[i] = 0.0
+                ep_lengths[i] = 0.0
+                ep_count += 1
+
+        obs = next_obs
+        step += env.num_envs
+        agent._step = step
+
+        # --- Learn ---
+        if step >= cfg.warmup_steps and step % (cfg.update_every * env.num_envs) == 0:
+            for _ in range(cfg.n_grad_steps):
+                metrics = agent.update(replay)
+                if metrics and step % cfg.log_interval == 0:
+                    for k, v in metrics.items():
+                        writer.add_scalar(k, v, step)
+
+        # --- Checkpoint ---
+        if step % cfg.save_interval == 0:
+            agent.save(os.path.join(ckpt_dir, "agent_latest.pt"))
+            print(f"[DreamerV3] step={step:,}  episodes={ep_count}"
+                  f"  buffer={len(replay):,}")
+
+        if not simulation_app.is_running():
+            break
+
+    # Final checkpoint
+    agent.save(os.path.join(ckpt_dir, "agent_final.pt"))
+    writer.close()
+    env.close()
+    print(f"[DreamerV3] Training complete. Logs: {log_dir}")
+
+
+if __name__ == "__main__":
+    main()
+    simulation_app.close()
