@@ -39,6 +39,6 @@ n_grad_steps: 1
 # Replay buffer
 replay_capacity: 500000
 
-# Logging / checkpointing
-log_interval: 100
-save_interval: 10000
+# Logging / checkpointing (counted in gradient updates, not env steps)
+log_interval: 50      # log every 50 gradient updates
+save_interval: 200    # checkpoint every 200 gradient updates

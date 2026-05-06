@@ -298,4 +298,4 @@ dependencies:
       - wrapt==1.16.0
       - yarl==1.18.3
       - zipp==3.23.1
-prefix: /home/aminys/miniconda3/envs/isaacsim
+# prefix is intentionally omitted — conda will use the default envs path on each machine

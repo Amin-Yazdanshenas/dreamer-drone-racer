@@ -60,9 +60,9 @@ class DreamerConfig:
     # Replay
     replay_capacity: int = 500_000
 
-    # Logging / checkpointing
-    log_interval: int = 100
-    save_interval: int = 10_000
+    # Logging / checkpointing (counted in gradient updates, not env steps)
+    log_interval: int = 50        # log every N gradient updates
+    save_interval: int = 200      # checkpoint every N gradient updates
 
     @classmethod
     def from_yaml(cls, path: str) -> "DreamerConfig":
@@ -132,10 +132,12 @@ class DreamerV3Agent:
 
     @torch.no_grad()
     def act(self, obs_dict: Dict[str, torch.Tensor],
-            deterministic: bool = False) -> torch.Tensor:
+            deterministic: bool = False,
+            prev_actions: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Return actions given current observations, update internal RSSM carry.
 
         During warmup (before warmup_steps), returns random actions.
+        prev_actions: (N, action_dim) actions from the previous step (zeros on episode start).
         """
         if self._step < self.cfg.warmup_steps:
             N = obs_dict["state"].shape[0]
@@ -145,9 +147,11 @@ class DreamerV3Agent:
         image = image.permute(0, 3, 1, 2)                               # (N,C,H,W)
         state = obs_dict["state"].to(self.device)
 
-        # Dummy zero action for the first observation encode (no action taken yet)
         N = state.shape[0]
-        prev_action = torch.zeros(N, self.cfg.action_dim, device=self.device)
+        if prev_actions is not None:
+            prev_action = prev_actions.to(self.device)
+        else:
+            prev_action = torch.zeros(N, self.cfg.action_dim, device=self.device)
 
         if self._rssm_state is None or self._rssm_state.h.shape[0] != N:
             self.reset_carry(N)

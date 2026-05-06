@@ -157,12 +157,13 @@ def actor_critic_loss(
 
     # Lambda returns
     targets = lambda_return(rewards, vals_with_boot, continues, gamma=gamma, lam=lam)  # (T, B)
-    targets_flat = targets.reshape(T * B).detach()
+    targets_flat = targets.reshape(T * B)           # keep grad for actor (flows through imagination)
+    targets_sg   = targets_flat.detach()            # stop-gradient copy for critic
 
-    # Critic loss
-    critic_loss = critic.loss(latents_flat.detach(), targets_flat)
+    # Critic loss — detach targets so critic update doesn't backprop through world model
+    critic_loss = critic.loss(latents_flat.detach(), targets_sg)
 
-    # Actor loss: maximize lambda returns + entropy bonus
+    # Actor loss: gradient flows actor → actions → RSSM → reward/cont heads → lambda returns
     actor_loss = -(targets_flat).mean()
     entropy = -log_probs.reshape(T * B).mean()
     actor_loss = actor_loss - entropy_scale * entropy

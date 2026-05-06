@@ -50,10 +50,13 @@ class DreamerIsaacEnvWrapper:
 
     def reset(self) -> Dict[str, torch.Tensor]:
         self.env.reset()
-        self._is_first = torch.ones(self.num_envs, dtype=torch.bool, device="cpu")
+        # self._is_first governs what the NEXT step() call returns; reset obs is already marked
+        # is_first=True below. Without zeroing here, the first step() would also return is_first=True
+        # (double reset), causing the RSSM to discard the first step's temporal context every episode.
+        self._is_first = torch.zeros(self.num_envs, dtype=torch.bool, device="cpu")
         obs = self._extract_obs()
         obs["reward"] = torch.zeros(self.num_envs, device="cpu")
-        obs["is_first"] = self._is_first.clone()
+        obs["is_first"] = torch.ones(self.num_envs, dtype=torch.bool, device="cpu")
         obs["is_last"] = torch.zeros(self.num_envs, dtype=torch.bool, device="cpu")
         obs["is_terminal"] = torch.zeros(self.num_envs, dtype=torch.bool, device="cpu")
         return obs

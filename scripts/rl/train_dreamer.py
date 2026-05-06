@@ -64,6 +64,11 @@ except Exception:
     pass
 
 """Rest follows after Isaac Sim init."""
+import sys
+from pathlib import Path
+_REPO_ROOT = Path(__file__).parent.resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import os
 import random
@@ -163,6 +168,8 @@ def main():
     agent.train_mode()
 
     step = agent._step
+    update_count = 0          # gradient update count (used for log/save triggers)
+    prev_actions = torch.zeros(env.num_envs, cfg.action_dim)
     ep_rewards = torch.zeros(env.num_envs)
     ep_gates = torch.zeros(env.num_envs, dtype=torch.float32)
     ep_lengths = torch.zeros(env.num_envs, dtype=torch.float32)
@@ -171,22 +178,28 @@ def main():
     while step < args_cli.max_steps:
         # --- Collect ---
         with torch.no_grad():
-            actions = agent.act(obs)
+            actions = agent.act(obs, prev_actions=prev_actions)
 
         next_obs = env.step(actions.cpu())
 
+        # Bug fix: pass obs["is_first"] (current step boundary), not next_obs["is_first"]
         replay.add(
             obs,
             actions.cpu(),
             next_obs["reward"],
-            next_obs["is_first"],
+            obs["is_first"],
             next_obs["is_last"],
         )
+
+        # Reset prev_actions on episode boundaries so carry is clean next step
+        prev_actions = actions.cpu()
+        done_mask = next_obs["is_last"]
+        if done_mask.any():
+            prev_actions[done_mask] = 0.0
 
         # Episode tracking
         ep_rewards += next_obs["reward"]
         ep_lengths += 1.0
-        done_mask = next_obs["is_last"]
         if done_mask.any():
             for i in done_mask.nonzero(as_tuple=True)[0]:
                 writer.add_scalar("env/episode_reward", ep_rewards[i].item(), step)
@@ -203,15 +216,17 @@ def main():
         if step >= cfg.warmup_steps and step % (cfg.update_every * env.num_envs) == 0:
             for _ in range(cfg.n_grad_steps):
                 metrics = agent.update(replay)
-                if metrics and step % cfg.log_interval == 0:
-                    for k, v in metrics.items():
-                        writer.add_scalar(k, v, step)
-
-        # --- Checkpoint ---
-        if step % cfg.save_interval == 0:
-            agent.save(os.path.join(ckpt_dir, "agent_latest.pt"))
-            print(f"[DreamerV3] step={step:,}  episodes={ep_count}"
-                  f"  buffer={len(replay):,}")
+                if metrics:
+                    update_count += 1
+                    # Log and save by gradient-update count, not env-step count.
+                    # This fires reliably regardless of num_envs or training speed.
+                    if update_count % cfg.log_interval == 0:
+                        for k, v in metrics.items():
+                            writer.add_scalar(k, v, step)
+                    if update_count % cfg.save_interval == 0:
+                        agent.save(os.path.join(ckpt_dir, "agent_latest.pt"))
+                        print(f"[DreamerV3] step={step:,}  updates={update_count:,}"
+                              f"  episodes={ep_count}  buffer={len(replay):,}")
 
         if not simulation_app.is_running():
             break

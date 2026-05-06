@@ -208,9 +208,13 @@ class WorldModel(nn.Module):
                  mlp_dim: int = 256,
                  cnn_depth: int = 32,
                  state_dim: int = 10,
-                 twohot_bins: int = 255):
+                 twohot_bins: int = 255,
+                 mask_pos_weight: float = 9.0):
         super().__init__()
         self.twohot_bins = twohot_bins
+        self.in_channels = in_channels
+        # pos_weight for mask channels in BCE: gate pixels are ~10% of image → weight ~9
+        self.mask_pos_weight = mask_pos_weight
 
         img_embed_dim = 512
         state_embed_dim = 64
@@ -272,7 +276,15 @@ class WorldModel(nn.Module):
         # --- Image reconstruction loss ---
         recon_logits = self.image_decoder(latent)   # (T*B, C, H, W)
         target_img = batch["image"].reshape(T * B, *batch["image"].shape[2:])
-        img_loss = F.binary_cross_entropy_with_logits(recon_logits, target_img, reduction="mean")
+        if self.in_channels in (1, 4):
+            # Mask channel is sparse (~5-10% gate pixels). Weight positive class to prevent
+            # the trivial all-black solution from dominating the BCE loss.
+            pw = torch.ones_like(recon_logits)
+            pw[:, -1:, :, :] = self.mask_pos_weight  # last channel = mask
+            img_loss = F.binary_cross_entropy_with_logits(recon_logits, target_img,
+                                                          pos_weight=pw, reduction="mean")
+        else:
+            img_loss = F.binary_cross_entropy_with_logits(recon_logits, target_img, reduction="mean")
 
         # --- Reward prediction loss (symlog twohot) ---
         rew_logits = self.reward_head(latent)                              # (T*B, bins)
@@ -288,8 +300,8 @@ class WorldModel(nn.Module):
         post_2d = post_logits.reshape(T * B, self.rssm.z_cats, self.rssm.z_classes)
         prior_2d = prior_logits.reshape(T * B, self.rssm.z_cats, self.rssm.z_classes)
 
-        kl_dyn = _kl_categorical(post_2d.detach(), prior_2d).mean().clamp(min=1.0)
-        kl_rep = _kl_categorical(post_2d, prior_2d.detach()).mean().clamp(min=1.0)
+        kl_dyn = _kl_categorical(post_2d.detach(), prior_2d).clamp(min=1.0).mean()
+        kl_rep = _kl_categorical(post_2d, prior_2d.detach()).clamp(min=1.0).mean()
 
         total = (beta_pred * (img_loss + rew_loss + cont_loss)
                  + beta_dyn * kl_dyn

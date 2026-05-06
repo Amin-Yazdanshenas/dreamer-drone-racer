@@ -58,9 +58,13 @@ conda env create -f environment.yml
 # 3. Activate it
 conda activate isaacsim
 
-# 4. Install the project modules in editable mode
+# 4. Install ALL local project modules in editable mode (required every fresh clone)
+#    This registers tasks/, utils/, dynamics/, and dreamer/ so Python can import them.
 pip3 install -e .
 ```
+
+> [!IMPORTANT]
+> **Step 4 must be re-run after every fresh clone**, even if the conda environment already exists. The `pip install -e .` command registers the local packages (`tasks`, `utils`, `dynamics`, `dreamer`) into the active environment. Skipping it causes `ModuleNotFoundError: No module named 'dreamer'` (or `tasks`, `utils`) when running any training or evaluation script.
 
 ### Option B — Manual installation
 
