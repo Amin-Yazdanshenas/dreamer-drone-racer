@@ -22,7 +22,7 @@ beta_rep: 0.1
 horizon: 15             # imagination rollout length
 gamma: 0.997
 lam: 0.95
-entropy_scale: 3.0e-4
+entropy_scale: 3.0e-3   # 10x increase to prevent actor tanh-saturation
 target_critic_ema: 0.98
 
 # Training
