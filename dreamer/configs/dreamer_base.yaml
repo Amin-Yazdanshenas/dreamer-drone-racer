@@ -1,5 +1,5 @@
 # DreamerV3 base configuration — shared defaults for all obs modes.
-# Scaled for RTX 3060 6 GB VRAM.  Override per obs mode in dreamer_rgb/mask/rgb_mask.yaml.
+# Scaled for 24 GB VRAM (e.g. RTX 3090/4090).  Override per obs mode in dreamer_rgb/mask/rgb_mask.yaml.
 
 obs_mode: rgb
 image_channels: 3       # overridden per yaml
@@ -27,14 +27,14 @@ target_critic_ema: 0.98
 
 # Training
 seq_len: 16             # sequence length per replay sample
-batch_size: 16          # number of sequences per gradient step
+batch_size: 32          # number of sequences per gradient step (was 16 for 6 GB)
 lr_world: 1.0e-4
 lr_actor: 3.0e-5
 lr_critic: 3.0e-5
 grad_clip: 100.0
 warmup_steps: 1000      # random action warmup before learning starts
-update_every: 1         # gradient updates per env step
-n_grad_steps: 1
+update_every: 1         # env steps between gradient update cycles
+n_grad_steps: 2         # gradient updates per cycle (was 1 for 6 GB)
 
 # Replay buffer
 replay_capacity: 500000
