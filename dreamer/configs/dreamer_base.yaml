@@ -14,15 +14,17 @@ mlp_dim: 256            # hidden dim for all MLPs (paper: 768)
 cnn_depth: 32           # base CNN channel count
 
 # World model loss coefficients
-beta_pred: 1.0
-beta_dyn: 0.5     # paper value; 1.0 caused KL spikes up to 29 nats and training instability
+# free_bits reduced to 0.1/cat → KL floor=3.2 nats; beta_pred raised so prediction
+# losses (~0.5 nats) dominate over the floor and force z to encode observations.
+beta_pred: 3.0
+beta_dyn: 0.1
 beta_rep: 0.1
 
 # Actor-critic
 horizon: 15             # imagination rollout length
 gamma: 0.997
 lam: 0.95
-entropy_scale: 3.0e-3   # 10x increase to prevent actor tanh-saturation
+entropy_scale: 3.0e-2   # must be large during early training when world-model reward gradient is near zero
 target_critic_ema: 0.98
 
 # Training

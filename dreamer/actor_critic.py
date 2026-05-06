@@ -24,7 +24,7 @@ class DreamerActor(nn.Module):
     Output: tanh-squashed actions in [-1, 1]^action_dim
     """
 
-    LOG_STD_MIN = -5.0
+    LOG_STD_MIN = -2.0   # hard floor: prevents std < exp(-2)=0.135 and entropy collapse
     LOG_STD_MAX = 2.0
 
     def __init__(self, latent_dim: int, action_dim: int, hidden_dim: int = 256,

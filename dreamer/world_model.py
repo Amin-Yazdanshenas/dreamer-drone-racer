@@ -327,12 +327,11 @@ class WorldModel(nn.Module):
 
 
 def _kl_categorical(post_logits: torch.Tensor, prior_logits: torch.Tensor,
-                    free_bits: float = 1.0) -> torch.Tensor:
+                    free_bits: float = 0.1) -> torch.Tensor:
     """KL(posterior || prior) with free-bits applied per categorical variable.
 
-    Free bits are clamped per z_cat (not on the total), then summed — matching
-    DreamerV3 Appendix C.  With z_cats=32 and free_bits=1.0 this means each
-    of the 32 categoricals can collapse up to 1 nat before the penalty fires.
+    free_bits=0.1 (was 1.0): floor = 32×0.1 = 3.2 nats, so prediction losses
+    dominate and z can escape the floor within the first ~100K steps.
 
     logits: (B, z_cats, z_classes) → returns (B,)
     """
