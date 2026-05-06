@@ -97,10 +97,15 @@ class SequenceReplayBuffer:
             }
             self._ep_bufs[i].append(step)
 
-            if last_np[i] and len(self._ep_bufs[i]) >= self.seq_len:
-                ep = self._ep_bufs[i].flush()
-                if ep is not None:
-                    self._store_episode(ep)
+            if last_np[i]:
+                if len(self._ep_bufs[i]) >= self.seq_len:
+                    ep = self._ep_bufs[i].flush()
+                    if ep is not None:
+                        self._store_episode(ep)
+                else:
+                    # Too short to sample from — discard, but MUST clear the buffer so the
+                    # next episode doesn't inherit this episode's data (cross-episode contamination).
+                    self._ep_bufs[i].flush()
 
     def _store_episode(self, episode: Dict[str, np.ndarray]) -> None:
         ep_len = len(episode["reward"])

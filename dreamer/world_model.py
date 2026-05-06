@@ -105,7 +105,7 @@ class RSSM(nn.Module):
 
         Args:
             embeds:   (T, B, embed_dim)
-            actions:  (T, B, action_dim)  — action taken to *arrive at* step t
+            actions:  (T, B, action_dim)  — action taken FROM step t (replay buffer convention)
             is_first: (T, B) bool — resets h,z to zero on episode start
 
         Returns:
@@ -117,15 +117,23 @@ class RSSM(nn.Module):
         device = embeds.device
         state = self.initial_state(B, device)
 
+        # RSSM recurrence: h_t = GRU(h_{t-1}, cat(z_{t-1}, embed(a_{t-1})))
+        # Replay buffer stores actions[t] = action taken FROM obs[t].
+        # We need a_{t-1}: shift by 1 and prepend zeros for t=0.
+        zero_act = torch.zeros(1, B, actions.shape[-1], device=device)
+        prev_actions = torch.cat([zero_act, actions[:-1]], dim=0)  # (T, B, A)
+
         hs, zs, post_list, prior_list = [], [], [], []
         for t in range(T):
             # Reset state on episode boundary
             reset = is_first[t].float().unsqueeze(-1)  # (B, 1)
             h = state.h * (1 - reset)
             z = state.z * (1 - reset)
+            # Also zero the previous action at episode start (no preceding action exists)
+            prev_act_t = prev_actions[t] * (1 - reset)
             state = RSSMState(h, z)
 
-            state, post_l, prior_l = self.obs_step(state, actions[t], embeds[t])
+            state, post_l, prior_l = self.obs_step(state, prev_act_t, embeds[t])
             hs.append(state.h)
             zs.append(state.z)
             post_list.append(post_l)
@@ -300,8 +308,8 @@ class WorldModel(nn.Module):
         post_2d = post_logits.reshape(T * B, self.rssm.z_cats, self.rssm.z_classes)
         prior_2d = prior_logits.reshape(T * B, self.rssm.z_cats, self.rssm.z_classes)
 
-        kl_dyn = _kl_categorical(post_2d.detach(), prior_2d).clamp(min=1.0).mean()
-        kl_rep = _kl_categorical(post_2d, prior_2d.detach()).clamp(min=1.0).mean()
+        kl_dyn = _kl_categorical(post_2d.detach(), prior_2d).mean()
+        kl_rep = _kl_categorical(post_2d, prior_2d.detach()).mean()
 
         total = (beta_pred * (img_loss + rew_loss + cont_loss)
                  + beta_dyn * kl_dyn
@@ -318,10 +326,18 @@ class WorldModel(nn.Module):
         return total, metrics, rssm_state
 
 
-def _kl_categorical(post_logits: torch.Tensor, prior_logits: torch.Tensor) -> torch.Tensor:
-    """KL(posterior || prior) summed over z_cats, averaged over z_classes."""
-    # logits: (B, z_cats, z_classes)
+def _kl_categorical(post_logits: torch.Tensor, prior_logits: torch.Tensor,
+                    free_bits: float = 1.0) -> torch.Tensor:
+    """KL(posterior || prior) with free-bits applied per categorical variable.
+
+    Free bits are clamped per z_cat (not on the total), then summed — matching
+    DreamerV3 Appendix C.  With z_cats=32 and free_bits=1.0 this means each
+    of the 32 categoricals can collapse up to 1 nat before the penalty fires.
+
+    logits: (B, z_cats, z_classes) → returns (B,)
+    """
     log_post = F.log_softmax(post_logits, dim=-1)
     log_prior = F.log_softmax(prior_logits, dim=-1)
     post_probs = log_post.exp()
-    return (post_probs * (log_post - log_prior)).sum(dim=-1).sum(dim=-1)
+    kl_per_cat = (post_probs * (log_post - log_prior)).sum(dim=-1)  # (B, z_cats)
+    return kl_per_cat.clamp(min=free_bits).sum(dim=-1)              # (B,)

@@ -9,7 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .networks import NormMLP
-from .utils import lambda_return, symlog, symexp, twohot_loss, TWOHOT_BINS
+from .utils import lambda_return, symlog, symexp, twohot_loss, TWOHOT_BINS, gumbel_straight_through
+from .world_model import RSSMState
 
 
 # ---------------------------------------------------------------------------
@@ -146,13 +147,21 @@ def actor_critic_loss(
     rewards = symexp(twohot_mean(rew_logits, bins=world_model.twohot_bins)).reshape(T, B)
     continues = torch.sigmoid(cont_logits).squeeze(-1).reshape(T, B)
 
-    # Bootstrap value at T from target critic
-    # We need value at each step t=0..T and bootstrap at T
+    # Bootstrap V(s_T): one extra img_step from the last imagined state to avoid
+    # the bias of using V(s_{T-1}) as a proxy for V(s_T).
     with torch.no_grad():
-        all_latents = latents_flat  # (T*B,)
-        vals = target_critic.value(all_latents).reshape(T, B)   # (T, B)
-        # bootstrap: use last critic value
-        bootstrap = vals[-1]   # (B,)
+        vals = target_critic.value(latents_flat).reshape(T, B)   # V(s_0)..V(s_{T-1})
+
+        last_state = RSSMState(imag_states.h[-1], imag_states.z[-1])
+        boot_action, _ = actor.act(last_state.latent)
+        _, h_boot = rssm.img_step(last_state, boot_action)
+        z_boot_logits = rssm.prior_mlp(h_boot)
+        z_boot = gumbel_straight_through(
+            z_boot_logits.reshape(-1, rssm.z_cats, rssm.z_classes)
+        ).reshape(-1, rssm.z_dim)
+        boot_latent = torch.cat([h_boot, z_boot], dim=-1)
+        bootstrap = target_critic.value(boot_latent)             # V(s_T), shape (B,)
+
         vals_with_boot = torch.cat([vals, bootstrap.unsqueeze(0)], dim=0)  # (T+1, B)
 
     # Lambda returns
@@ -170,7 +179,7 @@ def actor_critic_loss(
 
     metrics = {
         "actor/loss": actor_loss.item(),
-        "actor/entropy": (-entropy).item(),
+        "actor/entropy": entropy.item(),
         "critic/loss": critic_loss.item(),
         "imag/reward_mean": rewards.mean().item(),
         "imag/value_mean": vals.mean().item(),

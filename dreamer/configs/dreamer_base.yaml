@@ -15,7 +15,7 @@ cnn_depth: 32           # base CNN channel count
 
 # World model loss coefficients
 beta_pred: 1.0
-beta_dyn: 1.0
+beta_dyn: 0.5     # paper value; 1.0 caused KL spikes up to 29 nats and training instability
 beta_rep: 0.1
 
 # Actor-critic
