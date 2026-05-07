@@ -56,8 +56,7 @@ class ImageEncoder(nn.Module):
             nn.Conv2d(d * 2, d * 4, 4, stride=2), nn.ReLU(),         # 6×6
             nn.Conv2d(d * 4, d * 8, 4, stride=2), nn.ReLU(),         # 2×2
         )
-        conv_out = d * 8 * 2 * 2  # 32*8*4 = 8192 for depth=32? let's compute
-        # For 64×64 input with the strides above: 64→31→14→6→2  → 2×2×(d*8)
+        conv_out = d * 8 * 2 * 2  # 64→31→14→6→2 with 4×4 stride-2 convs → 2×2 feature map
         self.proj = nn.Linear(conv_out, embed_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

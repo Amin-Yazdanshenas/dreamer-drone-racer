@@ -28,37 +28,37 @@ class DreamerConfig:
     action_dim: int = 4
 
     # RSSM
-    h_dim: int = 512
+    h_dim: int = 2048
     z_cats: int = 32
     z_classes: int = 32
-    mlp_dim: int = 256
-    cnn_depth: int = 32
+    mlp_dim: int = 768
+    cnn_depth: int = 48
 
     # World model losses
-    beta_pred: float = 1.0
-    beta_dyn: float = 1.0
+    beta_pred: float = 3.0
+    beta_dyn: float = 0.1
     beta_rep: float = 0.1
 
     # Actor-critic
     horizon: int = 15
     gamma: float = 0.997
     lam: float = 0.95
-    entropy_scale: float = 3e-4
+    entropy_scale: float = 3e-2
     target_critic_ema: float = 0.98       # EMA update rate for target critic
 
     # Training
-    seq_len: int = 16
-    batch_size: int = 16
+    seq_len: int = 32
+    batch_size: int = 32
     lr_world: float = 1e-4
     lr_actor: float = 3e-5
     lr_critic: float = 3e-5
     grad_clip: float = 100.0
-    warmup_steps: int = 1000
+    warmup_steps: int = 2000
     update_every: int = 1                 # env steps between gradient updates
-    n_grad_steps: int = 1
+    n_grad_steps: int = 4
 
     # Replay
-    replay_capacity: int = 500_000
+    replay_capacity: int = 2_000_000
 
     # Logging / checkpointing (counted in gradient updates, not env steps)
     log_interval: int = 50        # log every N gradient updates
@@ -156,6 +156,14 @@ class DreamerV3Agent:
         if self._rssm_state is None or self._rssm_state.h.shape[0] != N:
             self.reset_carry(N)
 
+        # Reset carry for envs starting a new episode
+        if "is_first" in obs_dict and self._rssm_state is not None:
+            first_mask = obs_dict["is_first"].to(self.device).float().unsqueeze(-1)  # (N, 1)
+            self._rssm_state = RSSMState(
+                self._rssm_state.h * (1 - first_mask),
+                self._rssm_state.z * (1 - first_mask),
+            )
+
         embed = self.world_model.encode(image, state)
         self._rssm_state, _, _ = self.world_model.rssm.obs_step(
             self._rssm_state, prev_action, embed
@@ -167,11 +175,6 @@ class DreamerV3Agent:
         action, _, _ = self.actor(latent)
         return action
 
-    def update_carry_after_step(self, action: torch.Tensor) -> None:
-        """Store action taken so next obs_step uses the correct previous action."""
-        # Nothing needed here; act() uses zero prev action which is a minor
-        # approximation. For exact implementation, carry the last action externally.
-        pass
 
     # ------------------------------------------------------------------
     # Learning updates

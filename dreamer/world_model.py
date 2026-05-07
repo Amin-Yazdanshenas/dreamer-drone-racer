@@ -327,11 +327,12 @@ class WorldModel(nn.Module):
 
 
 def _kl_categorical(post_logits: torch.Tensor, prior_logits: torch.Tensor,
-                    free_bits: float = 0.1) -> torch.Tensor:
-    """KL(posterior || prior) with free-bits applied per categorical variable.
+                    free_bits: float = 0.0) -> torch.Tensor:
+    """KL(posterior || prior) — no free-bits floor.
 
-    free_bits=0.1 (was 1.0): floor = 32×0.1 = 3.2 nats, so prediction losses
-    dominate and z can escape the floor within the first ~100K steps.
+    free_bits=0.0: full gradient always flows to posterior, forcing z to encode
+    observations from the very first update. The KL penalty is kept small via
+    beta_dyn=0.1 to prevent instability.
 
     logits: (B, z_cats, z_classes) → returns (B,)
     """
@@ -339,4 +340,6 @@ def _kl_categorical(post_logits: torch.Tensor, prior_logits: torch.Tensor,
     log_prior = F.log_softmax(prior_logits, dim=-1)
     post_probs = log_post.exp()
     kl_per_cat = (post_probs * (log_post - log_prior)).sum(dim=-1)  # (B, z_cats)
-    return kl_per_cat.clamp(min=free_bits).sum(dim=-1)              # (B,)
+    if free_bits > 0.0:
+        kl_per_cat = kl_per_cat.clamp(min=free_bits)
+    return kl_per_cat.sum(dim=-1)                                    # (B,)
