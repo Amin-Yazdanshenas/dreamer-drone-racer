@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import copy
 import os
-from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -60,6 +60,10 @@ class DreamerConfig:
     # Replay
     replay_capacity: int = 2_000_000
 
+    # Speed
+    compile: bool = True                  # torch.compile the networks
+    amp_dtype: str = "bfloat16"          # "bfloat16" (recommended) or "float16"
+
     # Logging / checkpointing (counted in gradient updates, not env steps)
     log_interval: int = 50        # log every N gradient updates
     save_interval: int = 200      # checkpoint every N gradient updates
@@ -90,6 +94,8 @@ class DreamerV3Agent:
     def __init__(self, cfg: DreamerConfig, device: str = "cuda"):
         self.cfg = cfg
         self.device = torch.device(device)
+        self._amp_dtype = getattr(torch, cfg.amp_dtype)  # torch.bfloat16 or torch.float16
+        self._amp_device = "cuda" if self.device.type == "cuda" else "cpu"
 
         self.world_model = WorldModel(
             in_channels=cfg.image_channels,
@@ -106,16 +112,28 @@ class DreamerV3Agent:
 
         self.actor = DreamerActor(latent_dim, cfg.action_dim, cfg.mlp_dim).to(self.device)
         self.critic = DreamerCritic(latent_dim, cfg.mlp_dim).to(self.device)
+
+        # target_critic created before compile so deepcopy works cleanly
         self.target_critic = copy.deepcopy(self.critic)
         for p in self.target_critic.parameters():
             p.requires_grad_(False)
 
+        # Optimizers reference the underlying parameters — must be created before compile
         self.opt_wm = torch.optim.Adam(self.world_model.parameters(), lr=cfg.lr_world,
                                        eps=1e-8)
         self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr_actor,
                                           eps=1e-8)
         self.opt_critic = torch.optim.Adam(self.critic.parameters(), lr=cfg.lr_critic,
                                            eps=1e-8)
+
+        # torch.compile — wraps modules but underlying params stay the same objects,
+        # so optimizers above continue to update the right tensors
+        if cfg.compile and self.device.type == "cuda":
+            self.world_model  = torch.compile(self.world_model,  mode="reduce-overhead", fullgraph=False)
+            self.actor        = torch.compile(self.actor,        mode="reduce-overhead", fullgraph=False)
+            self.critic       = torch.compile(self.critic,       mode="reduce-overhead", fullgraph=False)
+            self.target_critic= torch.compile(self.target_critic,mode="reduce-overhead", fullgraph=False)
+            print(f"[DreamerV3] torch.compile enabled (mode=reduce-overhead, dtype={cfg.amp_dtype})")
 
         # Per-env RSSM carry (updated after each env step)
         self._rssm_state: Optional[RSSMState] = None
@@ -164,17 +182,21 @@ class DreamerV3Agent:
                 self._rssm_state.z * (1 - first_mask),
             )
 
-        embed = self.world_model.encode(image, state)
-        self._rssm_state, _, _ = self.world_model.rssm.obs_step(
-            self._rssm_state, prev_action, embed
-        )
+        with torch.autocast(device_type=self._amp_device, dtype=self._amp_dtype):
+            embed = self.world_model.encode(image, state)
+            new_state, _, _ = self.world_model.rssm.obs_step(
+                self._rssm_state, prev_action, embed
+            )
+
+        # Store carry in fp32 — prevents bfloat16 error accumulation across episodes
+        self._rssm_state = RSSMState(new_state.h.float(), new_state.z.float())
 
         latent = self._rssm_state.latent
         if deterministic:
             return self.actor.act_deterministic(latent)
-        action, _, _ = self.actor(latent)
-        return action
-
+        with torch.autocast(device_type=self._amp_device, dtype=self._amp_dtype):
+            action, _, _ = self.actor(latent)
+        return action.float()
 
     # ------------------------------------------------------------------
     # Learning updates
@@ -194,19 +216,19 @@ class DreamerV3Agent:
 
         # --- World model ---
         self.opt_wm.zero_grad(set_to_none=True)
-        wm_loss, wm_metrics, rssm_state = self.world_model.loss(
-            batch,
-            beta_pred=self.cfg.beta_pred,
-            beta_dyn=self.cfg.beta_dyn,
-            beta_rep=self.cfg.beta_rep,
-        )
+        with torch.autocast(device_type=self._amp_device, dtype=self._amp_dtype):
+            wm_loss, wm_metrics, rssm_state = self.world_model.loss(
+                batch,
+                beta_pred=self.cfg.beta_pred,
+                beta_dyn=self.cfg.beta_dyn,
+                beta_rep=self.cfg.beta_rep,
+            )
         wm_loss.backward()
         nn.utils.clip_grad_norm_(self.world_model.parameters(), self.cfg.grad_clip)
         self.opt_wm.step()
         metrics.update(wm_metrics)
 
         # --- Actor & Critic (imagination) ---
-        # Use posterior states as imagination start points
         init = RSSMState(
             rssm_state.h.detach().reshape(-1, rssm_state.h.shape[-1]),
             rssm_state.z.detach().reshape(-1, rssm_state.z.shape[-1]),
@@ -215,12 +237,13 @@ class DreamerV3Agent:
         self.opt_actor.zero_grad(set_to_none=True)
         self.opt_critic.zero_grad(set_to_none=True)
 
-        a_loss, c_loss, ac_metrics = actor_critic_loss(
-            self.actor, self.critic, self.target_critic,
-            self.world_model, init,
-            gamma=self.cfg.gamma, lam=self.cfg.lam,
-            horizon=self.cfg.horizon, entropy_scale=self.cfg.entropy_scale,
-        )
+        with torch.autocast(device_type=self._amp_device, dtype=self._amp_dtype):
+            a_loss, c_loss, ac_metrics = actor_critic_loss(
+                self.actor, self.critic, self.target_critic,
+                self.world_model, init,
+                gamma=self.cfg.gamma, lam=self.cfg.lam,
+                horizon=self.cfg.horizon, entropy_scale=self.cfg.entropy_scale,
+            )
 
         a_loss.backward()
         nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.grad_clip)
@@ -243,6 +266,7 @@ class DreamerV3Agent:
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        # state_dict() delegates through compiled wrapper to underlying module
         torch.save({
             "world_model": self.world_model.state_dict(),
             "actor": self.actor.state_dict(),

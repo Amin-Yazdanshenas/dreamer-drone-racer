@@ -41,6 +41,10 @@ n_grad_steps: 4         # gradient updates per cycle
 # Replay buffer
 replay_capacity: 2000000
 
+# Speed
+compile: true         # torch.compile networks (reduce-overhead mode)
+amp_dtype: bfloat16   # bfloat16 recommended for RTX 4090; fall back to float16 if issues
+
 # Logging / checkpointing (counted in gradient updates, not env steps)
 log_interval: 50      # log every 50 gradient updates
 save_interval: 200    # checkpoint every 200 gradient updates
