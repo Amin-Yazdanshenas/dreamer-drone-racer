@@ -24,7 +24,7 @@ class DreamerConfig:
     # Observation
     obs_mode: str = "rgb"                  # "rgb" | "mask" | "rgb_mask"
     image_channels: int = 3               # derived from obs_mode
-    state_dim: int = 10                   # ang_vel(3)+quat(4)+target_pos_b(3)
+    state_dim: int = 13                   # ang_vel(3)+quat(4)+lin_vel(3)+target_pos_b(3)
     action_dim: int = 4
 
     # RSSM
@@ -37,13 +37,14 @@ class DreamerConfig:
     # World model losses
     beta_pred: float = 3.0
     beta_dyn: float = 0.5
-    beta_rep: float = 0.5
+    beta_rep: float = 0.1
 
     # Actor-critic
     horizon: int = 15
     gamma: float = 0.997
     lam: float = 0.95
     entropy_scale: float = 3e-2
+    entropy_min: float = 1.0            # entropy floor; penalty activates below this (nats)
     target_critic_ema: float = 0.98       # EMA update rate for target critic
 
     # Training
@@ -244,6 +245,7 @@ class DreamerV3Agent:
                 self.world_model, init,
                 gamma=self.cfg.gamma, lam=self.cfg.lam,
                 horizon=self.cfg.horizon, entropy_scale=self.cfg.entropy_scale,
+                entropy_min=self.cfg.entropy_min,
                 return_normalizer=self._return_normalizer,
             )
 

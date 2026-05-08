@@ -170,6 +170,7 @@ def actor_critic_loss(
     lam: float = 0.95,
     horizon: int = 15,
     entropy_scale: float = 3e-4,
+    entropy_min: float = 1.0,
     return_normalizer: Optional[ReturnNormalizer] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, dict]:
     """Compute actor and critic losses over an imagined horizon.
@@ -228,7 +229,11 @@ def actor_critic_loss(
     # Actor loss: gradient flows actor → actions → RSSM → reward/cont heads → lambda returns
     actor_loss = -(actor_targets).mean()
     entropy = -log_probs.reshape(T * B).mean()
+    # Entropy bonus + floor: subtract normal bonus, then ADD penalty when below floor.
+    # When entropy < entropy_min: d(actor_loss)/d(entropy) = -2*entropy_scale → pushes up.
+    # (Adding F.relu term, not subtracting — subtracting cancels gradient to zero.)
     actor_loss = actor_loss - entropy_scale * entropy
+    actor_loss = actor_loss + entropy_scale * F.relu(entropy_min - entropy)
 
     metrics = {
         "actor/loss": actor_loss.item(),

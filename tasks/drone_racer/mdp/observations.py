@@ -286,37 +286,6 @@ def root_pose_g(
     return position
 
 
-def next_gate_pose_g(
-    env: ManagerBasedRLEnv,
-    command_name: str,
-) -> torch.Tensor:
-    """Asset root position in the gate frame."""
-    gate_pose_w = env.command_manager.get_term(command_name).command  # (num_envs, 7)
-    next_gate_pose_w = env.command_manager.get_term(command_name).next_gate  # (num_envs, 7)
-
-    # Extract positions and quaternions
-    gate_pos_w = gate_pose_w[:, :3]
-    gate_quat_w = gate_pose_w[:, 3:7]
-    next_gate_pos_w = next_gate_pose_w[:, :3]
-    next_gate_quat_w = next_gate_pose_w[:, 3:7]
-
-    # Compute drone pose in gate frame
-    # Inverse gate quaternion
-    gate_quat_w_inv = math_utils.quat_inv(gate_quat_w)
-
-    # Position of drone in gate frame
-    rel_pos = next_gate_pos_w - gate_pos_w
-    next_gate_pos_g = math_utils.quat_rotate(gate_quat_w_inv, rel_pos)
-
-    # Orientation of drone in gate frame
-    next_gate_quat_g = math_utils.quat_mul(gate_quat_w_inv, next_gate_quat_w)
-
-    # Concatenate position and quaternion
-    position = torch.cat([next_gate_pos_g, next_gate_quat_g], dim=-1)
-
-    return position
-
-
 def target_pos_b(
     env: ManagerBasedRLEnv,
     command_name: str | None = None,
@@ -329,7 +298,7 @@ def target_pos_b(
 
     if target_pos is None:
         target_pos = env.command_manager.get_term(command_name).command[:, :3]
-        target_pos_tensor = target_pos[:, :3]
+        target_pos_tensor = target_pos
     else:
         target_pos_tensor = (
             torch.tensor(target_pos, dtype=torch.float32, device=asset.device).repeat(env.num_envs, 1)

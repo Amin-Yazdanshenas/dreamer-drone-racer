@@ -23,12 +23,12 @@ class DreamerIsaacEnvWrapper:
         "mask"     : (N, H, W, 1) uint8 binary gate mask (0 or 255)
         "rgb_mask" : (N, H, W, 4) uint8 RGB + gate mask concatenated
 
-    State vector (10-dim float32):
-        ang_vel_b (3) + quat_w (4) + target_pos_b (3)
+    State vector (13-dim float32):
+        ang_vel_b (3) + quat_w (4) + lin_vel_b (3) + target_pos_b (3)
 
     Returned obs dict keys:
         image    : (N, H, W, C) uint8
-        state    : (N, 10) float32
+        state    : (N, 13) float32
         reward   : (N,) float32  — only after step(), not after reset()
         is_first : (N,) bool
         is_last  : (N,) bool     — True on terminated or truncated
@@ -104,11 +104,12 @@ class DreamerIsaacEnvWrapper:
         else:
             image = torch.cat([rgb_u8, mask_u8], dim=-1)   # (N, H, W, 4)
 
-        # --- State: ang_vel(3) + quat(4) + target_pos_b(3) = 10 ---
+        # --- State: ang_vel(3) + quat(4) + lin_vel(3) + target_pos_b(3) = 13 ---
         ang_vel = robot.data.root_ang_vel_b.cpu()           # (N, 3)
         quat = robot.data.root_quat_w.cpu()                 # (N, 4)
+        lin_vel = robot.data.root_lin_vel_b.cpu()           # (N, 3)
         target_pb = _compute_target_pos_b(robot, isaac, self.command_name).cpu()  # (N, 3)
-        state = torch.cat([ang_vel, quat, target_pb], dim=-1).float()
+        state = torch.cat([ang_vel, quat, lin_vel, target_pb], dim=-1).float()
 
         return {"image": image.cpu(), "state": state}
 

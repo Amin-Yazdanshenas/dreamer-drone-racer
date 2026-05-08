@@ -3,7 +3,7 @@
 
 obs_mode: rgb
 image_channels: 3       # overridden per yaml
-state_dim: 10           # ang_vel(3) + quat(4) + target_pos_b(3)
+state_dim: 13           # ang_vel(3) + quat(4) + lin_vel(3) + target_pos_b(3)
 action_dim: 4
 
 # RSSM — full paper spec (paper: h_dim=2048, mlp_dim=768, cnn_depth=48)
@@ -17,14 +17,15 @@ cnn_depth: 48           # base CNN channel count
 # free_bits=0.0: no KL floor — full gradient always flows to posterior from first update.
 # beta_dyn/rep=0.5: paper values; forces z to encode observations (combats posterior collapse).
 beta_pred: 3.0
-beta_dyn: 0.5
-beta_rep: 0.5
+beta_dyn: 0.5   # paper value; trains prior more aggressively
+beta_rep: 0.1   # keep low — beta_rep=0.5 + free_bits=0.0 causes posterior collapse
 
 # Actor-critic
 horizon: 15             # imagination rollout length
 gamma: 0.997
 lam: 0.95
 entropy_scale: 3.0e-2   # large during early training when world-model reward gradient is near zero
+entropy_min: 1.0        # floor: penalty kicks in if entropy drops below this (nats); prevents policy collapse
 target_critic_ema: 0.98
 
 # Training
