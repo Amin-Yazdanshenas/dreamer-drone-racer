@@ -10,7 +10,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from .actor_critic import DreamerActor, DreamerCritic, actor_critic_loss
+from .actor_critic import DreamerActor, DreamerCritic, ReturnNormalizer, actor_critic_loss
 from .replay_buffer import SequenceReplayBuffer
 from .world_model import RSSMState, WorldModel
 
@@ -36,8 +36,8 @@ class DreamerConfig:
 
     # World model losses
     beta_pred: float = 3.0
-    beta_dyn: float = 0.1
-    beta_rep: float = 0.1
+    beta_dyn: float = 0.5
+    beta_rep: float = 0.5
 
     # Actor-critic
     horizon: int = 15
@@ -138,6 +138,7 @@ class DreamerV3Agent:
         # Per-env RSSM carry (updated after each env step)
         self._rssm_state: Optional[RSSMState] = None
 
+        self._return_normalizer = ReturnNormalizer(decay=0.99)
         self._step: int = 0
         self._best_gates: float = 0.0
 
@@ -243,6 +244,7 @@ class DreamerV3Agent:
                 self.world_model, init,
                 gamma=self.cfg.gamma, lam=self.cfg.lam,
                 horizon=self.cfg.horizon, entropy_scale=self.cfg.entropy_scale,
+                return_normalizer=self._return_normalizer,
             )
 
         a_loss.backward()
@@ -275,6 +277,7 @@ class DreamerV3Agent:
             "opt_wm": self.opt_wm.state_dict(),
             "opt_actor": self.opt_actor.state_dict(),
             "opt_critic": self.opt_critic.state_dict(),
+            "return_normalizer": self._return_normalizer.state_dict(),
             "step": self._step,
             "best_gates": self._best_gates,
         }, path)
@@ -289,6 +292,8 @@ class DreamerV3Agent:
             self.opt_wm.load_state_dict(ckpt["opt_wm"])
             self.opt_actor.load_state_dict(ckpt["opt_actor"])
             self.opt_critic.load_state_dict(ckpt["opt_critic"])
+        if "return_normalizer" in ckpt:
+            self._return_normalizer.load_state_dict(ckpt["return_normalizer"])
         self._step = ckpt.get("step", 0)
         self._best_gates = ckpt.get("best_gates", 0.0)
         print(f"[DreamerV3] Loaded checkpoint from {path} (step={self._step})")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -113,6 +113,50 @@ class DreamerCritic(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Return normalizer (DreamerV3 §B — prevents pessimism spiral)
+# ---------------------------------------------------------------------------
+
+class ReturnNormalizer:
+    """EMA of 5th/95th percentile of lambda returns. Normalises actor targets by
+    max(1, pct95 - pct5) so gradient scale stays O(1) regardless of reward magnitude.
+
+    State is plain Python floats — not an nn.Module. Save/load via state_dict().
+    """
+
+    def __init__(self, decay: float = 0.99):
+        self.decay = decay
+        self._lo: Optional[float] = None   # EMA of 5th percentile
+        self._hi: Optional[float] = None   # EMA of 95th percentile
+
+    @property
+    def scale(self) -> float:
+        if self._lo is None:
+            return 1.0
+        return max(1.0, self._hi - self._lo)
+
+    def update(self, values: torch.Tensor) -> None:
+        v = values.detach().float()
+        lo = torch.quantile(v, 0.05).item()
+        hi = torch.quantile(v, 0.95).item()
+        if self._lo is None:
+            self._lo, self._hi = lo, hi
+        else:
+            self._lo = self.decay * self._lo + (1.0 - self.decay) * lo
+            self._hi = self.decay * self._hi + (1.0 - self.decay) * hi
+
+    def normalize(self, values: torch.Tensor) -> torch.Tensor:
+        return values / self.scale
+
+    def state_dict(self) -> dict:
+        return {"lo": self._lo, "hi": self._hi, "decay": self.decay}
+
+    def load_state_dict(self, d: dict) -> None:
+        self._lo = d.get("lo")
+        self._hi = d.get("hi")
+        self.decay = d.get("decay", self.decay)
+
+
+# ---------------------------------------------------------------------------
 # Actor-critic update (operates on imagined trajectories)
 # ---------------------------------------------------------------------------
 
@@ -126,6 +170,7 @@ def actor_critic_loss(
     lam: float = 0.95,
     horizon: int = 15,
     entropy_scale: float = 3e-4,
+    return_normalizer: Optional[ReturnNormalizer] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, dict]:
     """Compute actor and critic losses over an imagined horizon.
 
@@ -169,11 +214,19 @@ def actor_critic_loss(
     targets_flat = targets.reshape(T * B)           # keep grad for actor (flows through imagination)
     targets_sg   = targets_flat.detach()            # stop-gradient copy for critic
 
-    # Critic loss — detach targets so critic update doesn't backprop through world model
+    # Critic loss — uses symlog twohot (scale-invariant), no normalisation needed
     critic_loss = critic.loss(latents_flat.detach(), targets_sg)
 
+    # Return normalisation (DreamerV3 §B): update stats on detached targets, then
+    # divide actor targets by max(1, pct95 - pct5) to keep gradient O(1).
+    if return_normalizer is not None:
+        return_normalizer.update(targets_flat)
+        actor_targets = return_normalizer.normalize(targets_flat)
+    else:
+        actor_targets = targets_flat
+
     # Actor loss: gradient flows actor → actions → RSSM → reward/cont heads → lambda returns
-    actor_loss = -(targets_flat).mean()
+    actor_loss = -(actor_targets).mean()
     entropy = -log_probs.reshape(T * B).mean()
     actor_loss = actor_loss - entropy_scale * entropy
 
@@ -184,5 +237,6 @@ def actor_critic_loss(
         "imag/reward_mean": rewards.mean().item(),
         "imag/value_mean": vals.mean().item(),
         "imag/return_mean": targets.mean().item(),
+        "return/scale": return_normalizer.scale if return_normalizer is not None else 1.0,
     }
     return actor_loss, critic_loss, metrics

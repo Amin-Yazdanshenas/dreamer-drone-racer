@@ -15,10 +15,10 @@ cnn_depth: 48           # base CNN channel count
 
 # World model loss coefficients
 # free_bits=0.0: no KL floor — full gradient always flows to posterior from first update.
-# beta_dyn=0.1 keeps KL pressure small to prevent instability with free_bits=0.
+# beta_dyn/rep=0.5: paper values; forces z to encode observations (combats posterior collapse).
 beta_pred: 3.0
-beta_dyn: 0.1
-beta_rep: 0.1
+beta_dyn: 0.5
+beta_rep: 0.5
 
 # Actor-critic
 horizon: 15             # imagination rollout length
