@@ -69,8 +69,14 @@ class DreamerIsaacEnvWrapper:
         is_terminal = terminated.cpu()
         rew_cpu = rew.cpu().float() if isinstance(rew, torch.Tensor) else torch.tensor(rew, dtype=torch.float32)
 
+        # Gate pass signal: read directly from command manager (updated inside env.step)
+        gate_passed = self._isaac.command_manager.get_term(
+            self.command_name
+        ).gate_passed.cpu()  # (N,) bool
+
         obs = self._extract_obs()
         obs["reward"] = rew_cpu
+        obs["gate_passed"] = gate_passed
         obs["is_first"] = self._is_first.clone()
         obs["is_last"] = is_last
         obs["is_terminal"] = is_terminal

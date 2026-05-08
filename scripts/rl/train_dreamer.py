@@ -200,12 +200,18 @@ def main():
         # Episode tracking
         ep_rewards += next_obs["reward"]
         ep_lengths += 1.0
+        ep_gates += next_obs["gate_passed"].float()
         if done_mask.any():
             for i in done_mask.nonzero(as_tuple=True)[0]:
+                gates_i = ep_gates[i].item()
                 writer.add_scalar("env/episode_reward", ep_rewards[i].item(), step)
                 writer.add_scalar("env/episode_length", ep_lengths[i].item(), step)
+                writer.add_scalar("env/episode_gates", gates_i, step)
+                if gates_i > agent._best_gates:
+                    agent._best_gates = gates_i
                 ep_rewards[i] = 0.0
                 ep_lengths[i] = 0.0
+                ep_gates[i] = 0.0
                 ep_count += 1
 
         obs = next_obs
@@ -226,7 +232,8 @@ def main():
                     if update_count % cfg.save_interval == 0:
                         agent.save(os.path.join(ckpt_dir, "agent_latest.pt"))
                         print(f"[DreamerV3] step={step:,}  updates={update_count:,}"
-                              f"  episodes={ep_count}  buffer={len(replay):,}")
+                              f"  episodes={ep_count}  buffer={len(replay):,}"
+                              f"  best_gates={agent._best_gates:.0f}")
 
         if not simulation_app.is_running():
             break
