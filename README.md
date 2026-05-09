@@ -164,7 +164,7 @@ Inspired by [Dream to Fly (Romero et al., 2025)](https://arxiv.org/abs/2501.1437
 | `mask` | `Isaac-Drone-Racer-Dreamer-Mask-v0` | Binary gate mask | 1 |
 | `rgb_mask` | `Isaac-Drone-Racer-Dreamer-RGBMask-v0` | RGB + gate mask | 4 |
 
-All modes additionally receive a 10-dim kinematics state vector (ang_vel, quaternion, target gate position in body frame) through a separate MLP encoder fused into the RSSM.
+All modes additionally receive a 13-dim kinematics state vector (ang_vel, quaternion, lin_vel, target gate position in body frame) through a separate MLP encoder fused into the RSSM.
 
 ```bash
 # Train — RGB (closest to the Dream to Fly paper)
@@ -218,6 +218,82 @@ Checkpoints: `logs/dreamer/<obs_mode>/<timestamp>/checkpoints/`
 > ```bash
 > python3 scripts/rl/train.py --task Isaac-Drone-Racer-NoCam-v0 --headless --num_envs 4096 env.actions.control_action.use_motor_model=False
 > ```
+
+---
+
+## Monitoring DreamerV3 Training
+
+### Launch TensorBoard
+
+```bash
+conda activate isaacsim
+tensorboard --logdir logs/dreamer --port 6006
+# open http://localhost:6006
+```
+
+---
+
+### Phase 1 — Is the world model learning? (first 100K steps)
+
+| Metric | Healthy range | Warning sign |
+|--------|--------------|--------------|
+| `wm/kl_dyn` | 2–15 nats, rising then stable | Near 0 → z collapsed to prior; world model is random |
+| `wm/kl_rep` | 0.5–3 nats | > 10 → representation loss dominating; posterior collapse |
+| `wm/image_loss` | drops from ~0.7 → 0.3–0.5 | Stuck at 0.693 → predicting all-grey (sigmoid = 0.5) |
+| `wm/reward_loss` | steadily decreasing | Flat → world model cannot predict reward |
+
+`wm/kl_dyn` is the primary health indicator. If it collapses to near zero at any point, everything downstream (actor, critic, rewards) is trained on random noise.
+
+---
+
+### Phase 2 — Is the actor learning? (100K–1M steps)
+
+| Metric | Healthy range | Warning sign |
+|--------|--------------|--------------|
+| `actor/entropy` | ≥ 1.0 nats, stable | Drops below 0.5 → policy collapsed to near-deterministic |
+| `actor/loss` | fluctuating, trending down | Diverges toward +∞ → gradient explosion |
+| `imag/reward_mean` | trending upward | Stuck strongly negative → world model predicting failure |
+| `imag/return_mean` | trending upward | Constant negative → pessimism spiral |
+| `return/scale` | > 1.0 after 200K steps | Stuck at 1.0 → returns have zero variance (z collapsed) |
+
+---
+
+### Phase 3 — Is the drone navigating? (env metrics)
+
+| Metric | What to look for |
+|--------|-----------------|
+| `env/episode_reward` | Smooth upward trend; first positive episodes usually at 50K–200K steps |
+| `env/episode_length` | Increasing → drone surviving longer before crash/timeout |
+| `env/episode_gates` | **The key metric.** First nonzero value = first gate passed. Target: consistent ≥ 3 gates/episode by 3M steps |
+
+---
+
+### Diagnostic decision tree
+
+```
+env/episode_gates == 0 after 1M steps
+├── wm/kl_dyn ≈ 0
+│   └── World model broken. Check beta_dyn (too low), beta_rep (too high), free_bits.
+├── actor/entropy < 0.5
+│   └── Policy collapsed. Check entropy_scale (too low), entropy_min floor.
+└── imag/return_mean strongly negative and not improving
+    └── Pessimism spiral. Usually resolves at ~500K steps once wm/reward_loss drops.
+        If return/scale == 1.0, returns have no variance → normaliser inactive → z likely collapsed.
+```
+
+**Common failure pattern — KL collapse at ~40K steps:**
+`wm/kl_dyn` spikes briefly then falls to < 0.01. Cause: `beta_rep` too high with `free_bits=0`. Fix: keep `beta_rep ≤ 0.1`.
+
+**Common failure pattern — entropy collapse:**
+`actor/entropy` drops below 0.3 and stays there. Cause: entropy floor not active or `entropy_scale` too small. Fix: raise `entropy_scale`, verify `entropy_min = 1.0`.
+
+---
+
+### Comparing runs
+
+TensorBoard loads all subdirectories under `--logdir` simultaneously. Runs are named by timestamp automatically. Use the regex filter at the top of the Scalars panel to isolate specific runs. Comparing `wm/kl_dyn` between runs is the fastest way to confirm whether a config change actually improved world model learning.
+
+---
 
 ## Next Steps
 

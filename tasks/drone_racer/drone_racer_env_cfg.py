@@ -79,6 +79,13 @@ class ActionsCfg:
 
 
 @configclass
+class DreamerActionsCfg:
+    """CTBR action space for DreamerV3 — matches the Dream to Fly paper."""
+
+    control_action: mdp.CTBRActionCfg = mdp.CTBRActionCfg()
+
+
+@configclass
 class ObservationsCfg:
     """Observation specifications for the MDP."""
 
@@ -174,10 +181,10 @@ class CommandsCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
-    terminating = RewTerm(func=mdp.is_terminated, weight=-500.0)
-    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.0001)
-    progress = RewTerm(func=mdp.progress, weight=20.0, params={"command_name": "target"})
-    gate_passed = RewTerm(func=mdp.gate_passed, weight=400.0, params={"command_name": "target"})
+    terminating = RewTerm(func=mdp.is_terminated, weight=-4.0)
+    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.001)
+    progress = RewTerm(func=mdp.progress, weight=1.0, params={"command_name": "target"})
+    gate_passed = RewTerm(func=mdp.gate_passed, weight=10.0, params={"command_name": "target"})
     lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.1, params={"command_name": "target", "std": 0.5})
 
 
@@ -542,7 +549,7 @@ class DroneRacerEnvCfg_Dreamer(ManagerBasedRLEnvCfg):
 
     scene: DroneRacerSceneCfg = DroneRacerSceneCfg(num_envs=32, env_spacing=0.0)
     observations: DreamerObservationsCfg = DreamerObservationsCfg()
-    actions: ActionsCfg = ActionsCfg()
+    actions: DreamerActionsCfg = DreamerActionsCfg()
     commands: CommandsCfg = CommandsCfg()
     events: EventCfg = EventCfg()
     rewards: RewardsCfg = RewardsCfg()
@@ -567,7 +574,7 @@ class DroneRacerEnvCfg_Dreamer_PLAY(ManagerBasedRLEnvCfg):
 
     scene: DroneRacerSceneCfg = DroneRacerSceneCfg(num_envs=1, env_spacing=0.0)
     observations: DreamerObservationsCfg = DreamerObservationsCfg()
-    actions: ActionsCfg = ActionsCfg()
+    actions: DreamerActionsCfg = DreamerActionsCfg()
     commands: CommandsCfg = CommandsCfg()
     events: EventCfg = EventCfg()
     rewards: RewardsCfg = RewardsCfg()

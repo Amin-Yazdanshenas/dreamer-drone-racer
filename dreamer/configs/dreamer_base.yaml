@@ -17,19 +17,19 @@ cnn_depth: 48           # base CNN channel count
 # free_bits=0.0: no KL floor — full gradient always flows to posterior from first update.
 # beta_dyn/rep=0.5: paper values; forces z to encode observations (combats posterior collapse).
 beta_pred: 3.0
-beta_dyn: 0.5   # paper value; trains prior more aggressively
+beta_dyn: 1.0   # paper value; trains prior more aggressively
 beta_rep: 0.1   # keep low — beta_rep=0.5 + free_bits=0.0 causes posterior collapse
 
 # Actor-critic
 horizon: 15             # imagination rollout length
 gamma: 0.997
 lam: 0.95
-entropy_scale: 3.0e-2   # large during early training when world-model reward gradient is near zero
+entropy_scale: 3.0e-4   # paper value; prevents policy collapse without forcing excess exploration
 entropy_min: 1.0        # floor: penalty kicks in if entropy drops below this (nats); prevents policy collapse
 target_critic_ema: 0.98
 
 # Training
-seq_len: 32             # sequence length per replay sample (paper: 64; 32 safer with cameras)
+seq_len: 64             # sequence length per replay sample — paper value
 batch_size: 32          # number of sequences per gradient step
 lr_world: 1.0e-4
 lr_actor: 3.0e-5

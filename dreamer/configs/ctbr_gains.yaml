@@ -1,0 +1,14 @@
+roll:
+  kp: 0.964
+  kd: 0.0
+pitch:
+  kp: 0.72
+  kd: 0.0
+yaw:
+  kp: 1.5036
+  kd: 0.0
+max_roll_rate: 10.0
+max_pitch_rate: 10.0
+max_yaw_rate: 2.0
+max_thrust: 23.8239
+hover_thrust: 5.9606

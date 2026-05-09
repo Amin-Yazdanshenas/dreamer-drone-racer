@@ -36,19 +36,19 @@ class DreamerConfig:
 
     # World model losses
     beta_pred: float = 3.0
-    beta_dyn: float = 0.5
+    beta_dyn: float = 1.0
     beta_rep: float = 0.1
 
     # Actor-critic
     horizon: int = 15
     gamma: float = 0.997
     lam: float = 0.95
-    entropy_scale: float = 3e-2
+    entropy_scale: float = 3e-4
     entropy_min: float = 1.0            # entropy floor; penalty activates below this (nats)
     target_critic_ema: float = 0.98       # EMA update rate for target critic
 
     # Training
-    seq_len: int = 32
+    seq_len: int = 64
     batch_size: int = 32
     lr_world: float = 1e-4
     lr_actor: float = 3e-5
