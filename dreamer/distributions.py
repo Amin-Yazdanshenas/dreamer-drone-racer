@@ -140,11 +140,11 @@ class TwoHot:
         # Linear interpolation weights
         w_hi = (target - lo_val) / (hi_val - lo_val + 1e-8)
         w_lo = 1.0 - w_hi
-        # Build soft target
-        target_probs = torch.zeros_like(self.logits)
-        target_probs.scatter_(-1, lower.unsqueeze(-1), w_lo.unsqueeze(-1))
-        target_probs.scatter_add_(-1, upper.unsqueeze(-1), w_hi.unsqueeze(-1))
-        log_probs = F.log_softmax(self.logits, dim=-1)
+        # Build soft target — use float32 to avoid dtype mismatch under AMP
+        target_probs = torch.zeros_like(self.logits, dtype=torch.float32)
+        target_probs.scatter_(-1, lower.unsqueeze(-1), w_lo.float().unsqueeze(-1))
+        target_probs.scatter_add_(-1, upper.unsqueeze(-1), w_hi.float().unsqueeze(-1))
+        log_probs = F.log_softmax(self.logits.float(), dim=-1)
         return (target_probs * log_probs).sum(-1)
 
 
