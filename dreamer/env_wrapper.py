@@ -50,6 +50,8 @@ class DreamerIsaacEnvWrapper:
 
     def reset(self) -> Dict[str, torch.Tensor]:
         self.env.reset()
+        # Clear stale gate accumulator from the previous episode
+        self._isaac.command_manager.get_term(self.command_name).reset_step_accumulators()
         # self._is_first governs what the NEXT step() call returns; reset obs is already marked
         # is_first=True below. Without zeroing here, the first step() would also return is_first=True
         # (double reset), causing the RSSM to discard the first step's temporal context every episode.
@@ -63,6 +65,10 @@ class DreamerIsaacEnvWrapper:
 
     def step(self, actions: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Step the env with (N, 4) actions. Returns full obs dict."""
+        # Reset sticky gate accumulators before new physics sub-steps so that
+        # gate passes at ANY sub-step are captured (not just the last one).
+        cmd = self._isaac.command_manager.get_term(self.command_name)
+        cmd.reset_step_accumulators()
         _, rew, terminated, truncated, _ = self.env.step(actions)
 
         is_last = (terminated | truncated).cpu()

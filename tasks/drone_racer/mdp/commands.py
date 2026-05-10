@@ -66,6 +66,10 @@ class GateTargetingCommand(CommandTerm):
         self._gate_missed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._gate_passed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.next_gate_idx = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+        # Sticky accumulators — OR across all physics sub-steps in one RL step.
+        # Reset by reset_step_accumulators() (called from env wrapper before env.step).
+        self._gate_passed_accum = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._gate_missed_accum = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.next_gate_w = torch.zeros(self.num_envs, 7, device=self.device)
         # per-episode counters (reset in _resample_command, incremented in _update_command)
         self._gates_passed_episode = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
@@ -91,11 +95,16 @@ class GateTargetingCommand(CommandTerm):
 
     @property
     def gate_missed(self) -> torch.Tensor:
-        return self._gate_missed
+        return self._gate_missed_accum
 
     @property
     def gate_passed(self) -> torch.Tensor:
-        return self._gate_passed
+        return self._gate_passed_accum
+
+    def reset_step_accumulators(self) -> None:
+        """Reset sticky gate flags. Call from env wrapper before each env.step()."""
+        self._gate_passed_accum.zero_()
+        self._gate_missed_accum.zero_()
 
     @property
     def previous_pos(self) -> torch.Tensor:
@@ -184,13 +193,19 @@ class GateTargetingCommand(CommandTerm):
         ) * normal[:, 1]
         passed_gate_plane = (pos_old_projected < 0) & (pos_new_projected > 0)
 
-        self._gate_passed = passed_gate_plane & (
+        # Accumulate with OR so gate passes at any physics sub-step are captured.
+        # (With decimation=4, overwriting would discard ~75% of real gate passes.)
+        just_passed = passed_gate_plane & (
             torch.all(torch.abs(self.robot.data.root_pos_w - self.next_gate_w[:, :3]) < (self.gate_size / 2), dim=1)
         )
-
-        self._gate_missed = passed_gate_plane & (
+        just_missed = passed_gate_plane & (
             torch.any(torch.abs(self.robot.data.root_pos_w - self.next_gate_w[:, :3]) > (self.gate_size / 2), dim=1)
         )
+        self._gate_passed_accum |= just_passed
+        self._gate_missed_accum |= just_missed
+        # Keep _gate_passed/_gate_missed as current-sub-step for internal counter update
+        self._gate_passed = just_passed
+        self._gate_missed = just_missed
 
         # Update per-episode counters (check last gate before index wraps)
         lap_completed = self._gate_passed & (self.next_gate_idx == self.num_gates - 1)
