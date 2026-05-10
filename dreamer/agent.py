@@ -501,7 +501,7 @@ class DreamerV3Agent:
 
         # Run RSSM observe
         post_logits, post_stoch, prior_logits, prior_stoch, deters = self.rssm.observe(
-            embed, data["action"], data["is_first"].bool()
+            embed, data["action"], is_first=data["is_first"].bool()
         )
 
         # Flatten to (B*T, *) for heads
