@@ -23,7 +23,7 @@ free_bits: 1.0  # KL floor — main defence against posterior collapse
 
 # Actor-critic
 horizon: 15             # imagination rollout length
-gamma: 0.997
+# gamma derived from horizon: gamma = 1 - 1/horizon (≈ 0.997 for horizon=333)
 lam: 0.95
 entropy_scale: 3.0e-4   # paper value; prevents policy collapse without forcing excess exploration
 entropy_min: 1.0        # floor: penalty kicks in if entropy drops below this (nats); prevents policy collapse

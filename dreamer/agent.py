@@ -112,6 +112,9 @@ class DreamerConfig:
             d = yaml.safe_load(f)
         cfg = cls()
         for k, v in d.items():
+            # Skip read-only properties (e.g. gamma, image_channels)
+            if isinstance(getattr(type(cfg), k, None), property):
+                continue
             if hasattr(cfg, k):
                 setattr(cfg, k, v)
         return cfg
