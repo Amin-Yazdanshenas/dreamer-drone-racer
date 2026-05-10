@@ -254,7 +254,8 @@ class WorldModel(nn.Module):
         return torch.cat([img_emb, st_emb], dim=-1)
 
     def loss(self, batch: dict, beta_pred: float = 1.0,
-             beta_dyn: float = 1.0, beta_rep: float = 0.1) -> Tuple[torch.Tensor, dict]:
+             beta_dyn: float = 1.0, beta_rep: float = 0.1,
+             free_bits: float = 1.0) -> Tuple[torch.Tensor, dict]:
         """Compute total world-model loss over a (T, B) batch.
 
         batch keys: image (T,B,C,H,W), state (T,B,D), action (T,B,A),
@@ -308,8 +309,8 @@ class WorldModel(nn.Module):
         post_2d = post_logits.reshape(T * B, self.rssm.z_cats, self.rssm.z_classes)
         prior_2d = prior_logits.reshape(T * B, self.rssm.z_cats, self.rssm.z_classes)
 
-        kl_dyn = _kl_categorical(post_2d.detach(), prior_2d).mean()
-        kl_rep = _kl_categorical(post_2d, prior_2d.detach()).mean()
+        kl_dyn = _kl_categorical(post_2d.detach(), prior_2d, free_bits=free_bits).mean()
+        kl_rep = _kl_categorical(post_2d, prior_2d.detach(), free_bits=free_bits).mean()
 
         total = (beta_pred * (img_loss + rew_loss + cont_loss)
                  + beta_dyn * kl_dyn

@@ -1,9 +1,13 @@
-"""Sequence replay buffer for DreamerV3 — stores episodes, samples fixed-length chunks."""
+"""Sequence replay buffer for R2-Dreamer — stores episodes, samples fixed-length chunks.
+
+Sample output format: (B, T, ...) tensors — R2-Dreamer convention.
+Image stays as uint8; agent converts to float internally.
+"""
 
 from __future__ import annotations
 
 from collections import deque
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -49,6 +53,7 @@ class SequenceReplayBuffer:
         is_last : () bool
 
     Sample output tensors have shape (batch_size, seq_len, *feature_dims).
+    Image is kept as uint8 — agent converts to float/255 internally.
     """
 
     def __init__(self, capacity: int, seq_len: int, num_envs: int,
@@ -58,7 +63,7 @@ class SequenceReplayBuffer:
         self.num_envs = num_envs
         self.device = device
 
-        # One episode buffer per parallel env (collects in-progress episode)
+        # One episode buffer per parallel env
         self._ep_bufs: List[EpisodeBuffer] = [EpisodeBuffer() for _ in range(num_envs)]
 
         # Completed episodes stored as a deque; evict oldest when over capacity
@@ -79,12 +84,12 @@ class SequenceReplayBuffer:
         All tensors on any device; converted to CPU numpy here for storage.
         """
         N = actions.shape[0]
-        image_np = obs_dict["image"].cpu().numpy()    # (N, H, W, C) uint8
-        state_np = obs_dict["state"].cpu().float().numpy()   # (N, D) float32
-        act_np = actions.cpu().float().numpy()               # (N, A) float32
-        rew_np = rewards.cpu().float().numpy()               # (N,)
-        first_np = is_first.cpu().bool().numpy()             # (N,)
-        last_np = is_last.cpu().bool().numpy()               # (N,)
+        image_np = obs_dict["image"].cpu().numpy()              # (N, H, W, C) uint8
+        state_np = obs_dict["state"].cpu().float().numpy()      # (N, D) float32
+        act_np = actions.cpu().float().numpy()                  # (N, A) float32
+        rew_np = rewards.cpu().float().numpy()                  # (N,)
+        first_np = is_first.cpu().bool().numpy()                # (N,)
+        last_np = is_last.cpu().bool().numpy()                  # (N,)
 
         for i in range(N):
             step = {
@@ -103,8 +108,7 @@ class SequenceReplayBuffer:
                     if ep is not None:
                         self._store_episode(ep)
                 else:
-                    # Too short to sample from — discard, but MUST clear the buffer so the
-                    # next episode doesn't inherit this episode's data (cross-episode contamination).
+                    # Too short — discard but clear so next episode is clean
                     self._ep_bufs[i].flush()
 
     def _store_episode(self, episode: Dict[str, np.ndarray]) -> None:
@@ -117,14 +121,14 @@ class SequenceReplayBuffer:
             self._total_steps -= len(old["reward"])
 
     # ------------------------------------------------------------------
-    # Sample
+    # Sample — returns (B, T, ...) format (R2-Dreamer convention)
     # ------------------------------------------------------------------
 
     def sample(self, batch_size: int) -> Optional[Dict[str, torch.Tensor]]:
         """Sample a batch of (seq_len,) sequences.
 
-        Returns dict with tensors of shape (batch_size, seq_len, *feature),
-        transposed for RSSM to (seq_len, batch_size, *feature).
+        Returns dict with tensors of shape (batch_size, seq_len, *feature).
+        image stays as uint8 — agent converts to float.
         Returns None if not enough data.
         """
         if not self._can_sample(batch_size):
@@ -132,7 +136,7 @@ class SequenceReplayBuffer:
 
         sequences = []
         episodes = list(self._episodes)
-        # Weighted sampling by episode length (longer episodes more likely to be sampled)
+        # Weighted sampling by episode length
         lengths = np.array([len(ep["reward"]) for ep in episodes], dtype=np.float32)
         weights = lengths / lengths.sum()
 
@@ -145,18 +149,13 @@ class SequenceReplayBuffer:
             seq = {k: v[start: start + self.seq_len] for k, v in ep.items()}
             sequences.append(seq)
 
-        # Stack: (batch_size, seq_len, *dims) → transpose to (seq_len, batch_size, *dims)
+        # Stack: (batch_size, seq_len, *dims) — R2-Dreamer (B, T, ...) convention
         batch: Dict[str, torch.Tensor] = {}
         for k in sequences[0]:
-            arr = np.stack([s[k] for s in sequences], axis=0)   # (B, T, ...)
+            arr = np.stack([s[k] for s in sequences], axis=0)  # (B, T, ...)
             t = torch.from_numpy(arr).to(self.device)
-            # Move seq_len axis first: (B, T, ...) → (T, B, ...)
-            dims = list(range(t.ndim))
-            dims[0], dims[1] = dims[1], dims[0]
-            batch[k] = t.permute(*dims).contiguous()
-            # Convert image to float [0,1] for the model
-            if k == "image":
-                batch[k] = batch[k].float() / 255.0
+            # image stays uint8 — agent preprocesses
+            batch[k] = t
 
         return batch
 

@@ -169,7 +169,6 @@ def main():
 
     step = agent._step
     update_count = 0          # gradient update count (used for log/save triggers)
-    prev_actions = torch.zeros(env.num_envs, cfg.action_dim)
     ep_rewards = torch.zeros(env.num_envs)
     ep_gates = torch.zeros(env.num_envs, dtype=torch.float32)
     ep_lengths = torch.zeros(env.num_envs, dtype=torch.float32)
@@ -178,11 +177,10 @@ def main():
     while step < args_cli.max_steps:
         # --- Collect ---
         with torch.no_grad():
-            actions = agent.act(obs, prev_actions=prev_actions)
+            actions = agent.act(obs, is_first=obs["is_first"])
 
         next_obs = env.step(actions.cpu())
 
-        # Bug fix: pass obs["is_first"] (current step boundary), not next_obs["is_first"]
         replay.add(
             obs,
             actions.cpu(),
@@ -191,11 +189,7 @@ def main():
             next_obs["is_last"],
         )
 
-        # Reset prev_actions on episode boundaries so carry is clean next step
-        prev_actions = actions.cpu()
         done_mask = next_obs["is_last"]
-        if done_mask.any():
-            prev_actions[done_mask] = 0.0
 
         # Episode tracking
         ep_rewards += next_obs["reward"]

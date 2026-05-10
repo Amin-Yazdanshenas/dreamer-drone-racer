@@ -14,11 +14,12 @@ mlp_dim: 768            # hidden dim for all MLPs
 cnn_depth: 48           # base CNN channel count
 
 # World model loss coefficients
-# free_bits=0.0: no KL floor — full gradient always flows to posterior from first update.
-# beta_dyn/rep=0.5: paper values; forces z to encode observations (combats posterior collapse).
+# free_bits=1.0: KL floor per category (nats). Both NM512 and danijar use 1.0.
+# Prevents posterior collapse by forcing z to encode at least 1 nat from observations.
 beta_pred: 3.0
-beta_dyn: 1.0   # paper value; trains prior more aggressively
-beta_rep: 0.1   # keep low — beta_rep=0.5 + free_bits=0.0 causes posterior collapse
+beta_dyn: 0.5   # 1.0 caused posterior collapse via KL spike at 358K; 0.5 stable
+beta_rep: 0.1
+free_bits: 1.0  # KL floor — main defence against posterior collapse
 
 # Actor-critic
 horizon: 15             # imagination rollout length
@@ -30,7 +31,7 @@ target_critic_ema: 0.98
 
 # Training
 seq_len: 64             # sequence length per replay sample — paper value
-batch_size: 32          # number of sequences per gradient step
+batch_size: 16          # paper + both reference implementations use 16
 lr_world: 1.0e-4
 lr_actor: 3.0e-5
 lr_critic: 3.0e-5
