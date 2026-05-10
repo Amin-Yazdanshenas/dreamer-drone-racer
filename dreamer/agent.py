@@ -79,6 +79,21 @@ class DreamerConfig:
     loss_scale_value: float = 1.0
     loss_scale_repval: float = 0.3
 
+    # NE-Dreamer (ignored by DreamerV3Agent / R2-Dreamer)
+    ne_hidden_dim: int = 256
+    ne_num_layers: int = 2
+    ne_num_heads: int = 4
+    ne_dropout: float = 0.0
+    ne_use_actions: bool = True
+    ne_use_same: bool = False
+    ne_use_next: bool = True
+    ne_predict_horizon: int = 1
+    ne_horizon_discount: float = 0.9
+    ne_loss_type: str = "barlow"
+    ne_lambd: float = 5e-4
+    ne_weight_same: float = 1.0
+    ne_weight_next: float = 1.0
+
     # Optimizer (LaProp + AGC)
     lr: float = 4e-5
     agc: float = 0.3
@@ -326,16 +341,8 @@ class DreamerV3Agent:
         # Return EMA (for value normalisation)
         self.return_ema = ReturnEMA(alpha=cfg.slow_target_fraction).to(self.device)
 
-        # Single LaProp optimizer for all world-model params
-        wm_params = (
-            list(self.encoder.parameters())
-            + list(self.rssm.parameters())
-            + list(self.reward_head.parameters())
-            + list(self.cont_head.parameters())
-            + list(self.projector_rssm.parameters())
-            + list(self.projector_embed.parameters())
-        )
-        self.opt_wm = LaProp(wm_params, lr=cfg.lr, betas=(cfg.beta1, cfg.beta2), eps=cfg.eps)
+        self.opt_wm = LaProp(self._get_wm_params(), lr=cfg.lr,
+                             betas=(cfg.beta1, cfg.beta2), eps=cfg.eps)
         self.opt_actor = LaProp(self.actor.parameters(), lr=cfg.lr,
                                 betas=(cfg.beta1, cfg.beta2), eps=cfg.eps)
         self.opt_critic = LaProp(self.critic.parameters(), lr=cfg.lr,
@@ -351,6 +358,94 @@ class DreamerV3Agent:
         self._step: int = 0
         self._best_gates: float = 0.0
         self._update_count: int = 0
+
+    # ------------------------------------------------------------------
+    # World-model parameter and repr-loss hooks (override in subclasses)
+    # ------------------------------------------------------------------
+
+    def _get_wm_extra_params(self) -> list:
+        """Extra WM params (projectors / transformer). Uses hasattr for subclass safety."""
+        params: list = []
+        if hasattr(self, "projector_rssm"):
+            params += list(self.projector_rssm.parameters())
+        if hasattr(self, "projector_embed"):
+            params += list(self.projector_embed.parameters())
+        if hasattr(self, "ne_transformer"):
+            params += list(self.ne_transformer.parameters())
+        return params
+
+    def _get_wm_params(self) -> list:
+        return (
+            list(self.encoder.parameters())
+            + list(self.rssm.parameters())
+            + list(self.reward_head.parameters())
+            + list(self.cont_head.parameters())
+            + self._get_wm_extra_params()
+        )
+
+    @property
+    def _repr_loss_metric_key(self) -> str:
+        return "wm/barlow"
+
+    def _repr_loss(self, latent: torch.Tensor, embed_flat: torch.Tensor,
+                   actions: torch.Tensor, B: int, T: int) -> torch.Tensor:
+        """R2-Dreamer: single-step RSSM↔encoder Barlow Twins. Override for NE-Dreamer."""
+        z1 = self.projector_rssm(latent)
+        z2 = self.projector_embed(embed_flat.detach())
+        return barlow_twins_loss(z1, z2, lambd=self.cfg.barlow_lambd)
+
+    # ------------------------------------------------------------------
+    # Checkpoint helpers (override in subclasses to add extra keys)
+    # ------------------------------------------------------------------
+
+    def _build_checkpoint(self) -> dict:
+        ckpt: dict = {
+            "encoder": self.encoder.state_dict(),
+            "rssm": self.rssm.state_dict(),
+            "reward_head": self.reward_head.state_dict(),
+            "cont_head": self.cont_head.state_dict(),
+            "actor": self.actor.state_dict(),
+            "critic": self.critic.state_dict(),
+            "target_critic": self.target_critic.state_dict(),
+            "return_ema": self.return_ema.state_dict(),
+            "opt_wm": self.opt_wm.state_dict(),
+            "opt_actor": self.opt_actor.state_dict(),
+            "opt_critic": self.opt_critic.state_dict(),
+            "step": self._step,
+            "best_gates": self._best_gates,
+            "update_count": self._update_count,
+        }
+        if hasattr(self, "projector_rssm"):
+            ckpt["projector_rssm"] = self.projector_rssm.state_dict()
+        if hasattr(self, "projector_embed"):
+            ckpt["projector_embed"] = self.projector_embed.state_dict()
+        if hasattr(self, "ne_transformer"):
+            ckpt["ne_transformer"] = self.ne_transformer.state_dict()
+        return ckpt
+
+    def _load_checkpoint(self, ckpt: dict) -> None:
+        self.encoder.load_state_dict(ckpt["encoder"])
+        self.rssm.load_state_dict(ckpt["rssm"])
+        self.reward_head.load_state_dict(ckpt["reward_head"])
+        self.cont_head.load_state_dict(ckpt["cont_head"])
+        if "projector_rssm" in ckpt and hasattr(self, "projector_rssm"):
+            self.projector_rssm.load_state_dict(ckpt["projector_rssm"])
+        if "projector_embed" in ckpt and hasattr(self, "projector_embed"):
+            self.projector_embed.load_state_dict(ckpt["projector_embed"])
+        if "ne_transformer" in ckpt and hasattr(self, "ne_transformer"):
+            self.ne_transformer.load_state_dict(ckpt["ne_transformer"])
+        self.actor.load_state_dict(ckpt["actor"])
+        self.critic.load_state_dict(ckpt["critic"])
+        self.target_critic.load_state_dict(ckpt["target_critic"])
+        if "return_ema" in ckpt:
+            self.return_ema.load_state_dict(ckpt["return_ema"])
+        if "opt_wm" in ckpt:
+            self.opt_wm.load_state_dict(ckpt["opt_wm"])
+            self.opt_actor.load_state_dict(ckpt["opt_actor"])
+            self.opt_critic.load_state_dict(ckpt["opt_critic"])
+        self._step = ckpt.get("step", 0)
+        self._best_gates = ckpt.get("best_gates", 0.0)
+        self._update_count = ckpt.get("update_count", 0)
 
     # ------------------------------------------------------------------
     # Acting
@@ -456,15 +551,7 @@ class DreamerV3Agent:
 
         self._scaler.scale(wm_loss).backward()
         self._scaler.unscale_(self.opt_wm)
-        clip_grad_agc_(
-            list(self.encoder.parameters())
-            + list(self.rssm.parameters())
-            + list(self.reward_head.parameters())
-            + list(self.cont_head.parameters())
-            + list(self.projector_rssm.parameters())
-            + list(self.projector_embed.parameters()),
-            clip=self.cfg.agc, pmin=self.cfg.pmin,
-        )
+        clip_grad_agc_(self._get_wm_params(), clip=self.cfg.agc, pmin=self.cfg.pmin)
         self._scaler.step(self.opt_wm)
         self._scaler.update()
 
@@ -527,27 +614,21 @@ class DreamerV3Agent:
         kl = kl_loss(post_dist, prior_dist, free=self.cfg.kl_free, balance=0.8)
         kl_mean = kl.mean()
 
-        # Barlow Twins: align RSSM latent with encoder embedding.
-        # Forces the RSSM to predict what the encoder sees → provides the
-        # observation signal that replaces the image decoder in R2-Dreamer.
-        # Stop-grad on encoder side so only the RSSM projector is trained to match.
         embed_flat = embed.reshape(B * T, -1)
-        z1 = self.projector_rssm(latent)                   # from RSSM (B*T, mlp_units)
-        z2 = self.projector_embed(embed_flat.detach())     # from encoder, stop-grad
-        bt_loss = barlow_twins_loss(z1, z2, lambd=self.cfg.barlow_lambd)
+        repr_loss = self._repr_loss(latent, embed_flat, data["action"], B, T)
 
         total = (
             self.cfg.loss_scale_rew * rew_loss
             + self.cfg.loss_scale_con * cont_loss
             + self.cfg.loss_scale_dyn * kl_mean
-            + self.cfg.loss_scale_barlow * bt_loss
+            + self.cfg.loss_scale_barlow * repr_loss
         )
 
         metrics = {
             "wm/rew_loss": rew_loss.item(),
             "wm/cont_loss": cont_loss.item(),
             "wm/kl": kl_mean.item(),
-            "wm/barlow": bt_loss.item(),
+            self._repr_loss_metric_key: repr_loss.item(),
             "wm/total": total.item(),
         }
         return total, metrics, post_stoch, deters
@@ -638,8 +719,12 @@ class DreamerV3Agent:
         self.rssm.train()
         self.reward_head.train()
         self.cont_head.train()
-        self.projector_rssm.train()
-        self.projector_embed.train()
+        if hasattr(self, "projector_rssm"):
+            self.projector_rssm.train()
+        if hasattr(self, "projector_embed"):
+            self.projector_embed.train()
+        if hasattr(self, "ne_transformer"):
+            self.ne_transformer.train()
         self.actor.train()
         self.critic.train()
 
@@ -648,8 +733,12 @@ class DreamerV3Agent:
         self.rssm.eval()
         self.reward_head.eval()
         self.cont_head.eval()
-        self.projector_rssm.eval()
-        self.projector_embed.eval()
+        if hasattr(self, "projector_rssm"):
+            self.projector_rssm.eval()
+        if hasattr(self, "projector_embed"):
+            self.projector_embed.eval()
+        if hasattr(self, "ne_transformer"):
+            self.ne_transformer.eval()
         self.actor.eval()
         self.critic.eval()
 
@@ -659,47 +748,11 @@ class DreamerV3Agent:
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save({
-            "encoder": self.encoder.state_dict(),
-            "rssm": self.rssm.state_dict(),
-            "reward_head": self.reward_head.state_dict(),
-            "cont_head": self.cont_head.state_dict(),
-            "projector_rssm": self.projector_rssm.state_dict(),
-            "projector_embed": self.projector_embed.state_dict(),
-            "actor": self.actor.state_dict(),
-            "critic": self.critic.state_dict(),
-            "target_critic": self.target_critic.state_dict(),
-            "return_ema": self.return_ema.state_dict(),
-            "opt_wm": self.opt_wm.state_dict(),
-            "opt_actor": self.opt_actor.state_dict(),
-            "opt_critic": self.opt_critic.state_dict(),
-            "step": self._step,
-            "best_gates": self._best_gates,
-            "update_count": self._update_count,
-        }, path)
+        torch.save(self._build_checkpoint(), path)
 
     def load(self, path: str) -> None:
         ckpt = torch.load(path, map_location=self.device)
-        self.encoder.load_state_dict(ckpt["encoder"])
-        self.rssm.load_state_dict(ckpt["rssm"])
-        self.reward_head.load_state_dict(ckpt["reward_head"])
-        self.cont_head.load_state_dict(ckpt["cont_head"])
-        if "projector_rssm" in ckpt:
-            self.projector_rssm.load_state_dict(ckpt["projector_rssm"])
-        if "projector_embed" in ckpt:
-            self.projector_embed.load_state_dict(ckpt["projector_embed"])
-        self.actor.load_state_dict(ckpt["actor"])
-        self.critic.load_state_dict(ckpt["critic"])
-        self.target_critic.load_state_dict(ckpt["target_critic"])
-        if "return_ema" in ckpt:
-            self.return_ema.load_state_dict(ckpt["return_ema"])
-        if "opt_wm" in ckpt:
-            self.opt_wm.load_state_dict(ckpt["opt_wm"])
-            self.opt_actor.load_state_dict(ckpt["opt_actor"])
-            self.opt_critic.load_state_dict(ckpt["opt_critic"])
-        self._step = ckpt.get("step", 0)
-        self._best_gates = ckpt.get("best_gates", 0.0)
-        self._update_count = ckpt.get("update_count", 0)
+        self._load_checkpoint(ckpt)
         print(f"[R2-Dreamer] Loaded checkpoint from {path} (step={self._step})")
 
 

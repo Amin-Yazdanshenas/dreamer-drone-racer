@@ -40,6 +40,10 @@ parser.add_argument(
     "--obs_mode", type=str, default="rgb", choices=["rgb", "mask", "rgb_mask"],
     help="Observation mode for DreamerV3 image encoder."
 )
+parser.add_argument(
+    "--agent", type=str, default="r2dreamer", choices=["r2dreamer", "ne_dreamer"],
+    help="Agent variant: r2dreamer (Barlow Twins) or ne_dreamer (causal transformer)."
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Override number of envs.")
 parser.add_argument("--max_steps", type=int, default=2_000_000, help="Total env steps.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Resume from .pt file.")
@@ -82,13 +86,25 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
 import tasks  # noqa: F401
-from dreamer import DreamerConfig, DreamerIsaacEnvWrapper, DreamerV3Agent
+from dreamer import DreamerConfig, DreamerIsaacEnvWrapper, DreamerV3Agent, NEDreamerV3Agent
 from dreamer.replay_buffer import SequenceReplayBuffer
 
 _OBS_MODE_TO_CONFIG = {
-    "rgb": "dreamer/configs/dreamer_rgb.yaml",
-    "mask": "dreamer/configs/dreamer_mask.yaml",
-    "rgb_mask": "dreamer/configs/dreamer_rgb_mask.yaml",
+    "r2dreamer": {
+        "rgb": "dreamer/configs/dreamer_rgb.yaml",
+        "mask": "dreamer/configs/dreamer_mask.yaml",
+        "rgb_mask": "dreamer/configs/dreamer_rgb_mask.yaml",
+    },
+    "ne_dreamer": {
+        "rgb": "dreamer/configs/ne_dreamer_rgb.yaml",
+        "mask": "dreamer/configs/ne_dreamer_mask.yaml",
+        "rgb_mask": "dreamer/configs/ne_dreamer_rgb_mask.yaml",
+    },
+}
+
+_AGENT_TO_BASE_CONFIG = {
+    "r2dreamer": "dreamer/configs/dreamer_base.yaml",
+    "ne_dreamer": "dreamer/configs/ne_dreamer_base.yaml",
 }
 
 
@@ -96,8 +112,8 @@ def _load_config(args) -> DreamerConfig:
     """Load base config, overlay obs-mode config, then apply CLI overrides."""
     import yaml
 
-    base_path = "dreamer/configs/dreamer_base.yaml"
-    mode_path = args.config or _OBS_MODE_TO_CONFIG[args.obs_mode]
+    base_path = _AGENT_TO_BASE_CONFIG[args.agent]
+    mode_path = args.config or _OBS_MODE_TO_CONFIG[args.agent][args.obs_mode]
 
     with open(base_path) as f:
         base = yaml.safe_load(f)
@@ -138,7 +154,10 @@ def main():
     # ----------------------------------------------------------------
     # Agent & replay buffer
     # ----------------------------------------------------------------
-    agent = DreamerV3Agent(cfg, device=device)
+    if args_cli.agent == "ne_dreamer":
+        agent = NEDreamerV3Agent(cfg, device=device)
+    else:
+        agent = DreamerV3Agent(cfg, device=device)
     replay = SequenceReplayBuffer(
         capacity=cfg.replay_capacity,
         seq_len=cfg.seq_len,
@@ -154,7 +173,9 @@ def main():
     # Logging
     # ----------------------------------------------------------------
     run_tag = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_dir = os.path.abspath(os.path.join("logs", "dreamer", args_cli.obs_mode, run_tag))
+    log_dir = os.path.abspath(
+        os.path.join("logs", "dreamer", args_cli.agent, args_cli.obs_mode, run_tag)
+    )
     ckpt_dir = os.path.join(log_dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=os.path.join(log_dir, "tensorboard"))

@@ -468,3 +468,146 @@ class StateEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+
+# ---------------------------------------------------------------------------
+# NEDreamerTransformer — causal temporal transformer for NE-Dreamer
+# ---------------------------------------------------------------------------
+
+class NEDreamerTransformer(nn.Module):
+    """Causal transformer that predicts encoder embeddings from RSSM features.
+
+    Ported from https://github.com/corl-team/nedreamer (MIT License).
+
+    With use_actions=True, tokens are interleaved as [f0, a0, f1, a1, ...].
+    Causal masking ensures prediction at t only sees history up to t.
+    heads_next[k] predicts embed[t + k + 1] from the action token at t.
+    """
+
+    def __init__(
+        self,
+        feat_dim: int,
+        output_dim: int,
+        action_dim: int,
+        hidden_dim: int = 256,
+        num_layers: int = 2,
+        num_heads: int = 4,
+        max_seq_len: int = 128,
+        dropout: float = 0.0,
+        use_actions: bool = True,
+        use_same: bool = False,
+        use_next: bool = True,
+        predict_horizon: int = 1,
+    ):
+        super().__init__()
+        assert use_same or use_next, "at least one of use_same or use_next must be True"
+        assert predict_horizon >= 1
+
+        self.hidden_dim = hidden_dim
+        self.use_actions = use_actions
+        self.use_same = use_same
+        self.use_next = use_next
+        self.predict_horizon = predict_horizon
+
+        self.f_embed = nn.Linear(feat_dim, hidden_dim)
+        if use_actions:
+            self.a_embed = nn.Sequential(
+                nn.Linear(action_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.GELU(),
+            )
+            self.pos_embed = nn.Parameter(torch.zeros(1, 2 * max_seq_len, hidden_dim))
+        else:
+            self.a_embed = None
+            self.pos_embed = nn.Parameter(torch.zeros(1, max_seq_len, hidden_dim))
+        nn.init.normal_(self.pos_embed, std=0.02)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=num_heads,
+            dim_feedforward=hidden_dim * 4,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        def _head():
+            return nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, output_dim),
+            )
+
+        self.heads_next = nn.ModuleList([_head() for _ in range(predict_horizon)]) if use_next else None
+        self.head_same = _head() if use_same else None
+
+        self._init_weights()
+        nn.init.normal_(self.pos_embed, std=0.02)
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=0.5)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def _causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1)
+        return mask.masked_fill(mask == 1, float("-inf"))
+
+    def forward(
+        self, feat: torch.Tensor, actions: torch.Tensor | None = None
+    ):
+        """
+        Args:
+            feat:    (B, T, feat_dim) — RSSM features (stoch + deter)
+            actions: (B, T, action_dim) — required when use_actions=True
+
+        Returns (depends on use_same / use_next):
+            use_same only:  e_hat_same   (B, T, output_dim)
+            use_next only:  e_hat_next   list of (B, T-1-k, output_dim) per horizon k
+            both:           (e_hat_same, e_hat_next_list)
+        """
+        B, T, _ = feat.shape
+        device = feat.device
+
+        tok_f = self.f_embed(feat)  # (B, T, H)
+
+        if self.use_actions:
+            assert actions is not None
+            tok_a = self.a_embed(actions.float())        # (B, T, H)
+            tokens = torch.stack([tok_f, tok_a], dim=2).reshape(B, 2 * T, -1)
+            tokens = tokens + self.pos_embed[:, : tokens.size(1)]
+            h = self.transformer(tokens, mask=self._causal_mask(tokens.size(1), device))
+
+            f_idx = torch.arange(0, 2 * T, 2, device=device)
+            h_same = h[:, f_idx]                        # (B, T, H) — feat positions
+
+            a_idx = torch.arange(1, 2 * T - 1, 2, device=device)
+            h_next = h[:, a_idx]                        # (B, T-1, H) — action positions
+        else:
+            tokens = tok_f + self.pos_embed[:, :T]
+            h = self.transformer(tokens, mask=self._causal_mask(T, device))
+            h_same = h
+            h_next = h[:, :-1]                          # (B, T-1, H)
+
+        e_hat_same = self.head_same(h_same) if self.use_same else None
+
+        e_hat_next_list: list | None = None
+        if self.use_next:
+            T_h = h_next.shape[1]                       # T-1
+            e_hat_next_list = []
+            for k in range(self.predict_horizon):
+                if k < T_h:
+                    e_hat_next_list.append(self.heads_next[k](h_next[:, : T_h - k]))
+                else:
+                    e_hat_next_list.append(None)
+
+        if self.use_same and self.use_next:
+            return e_hat_same, e_hat_next_list
+        if self.use_same:
+            return e_hat_same
+        return e_hat_next_list

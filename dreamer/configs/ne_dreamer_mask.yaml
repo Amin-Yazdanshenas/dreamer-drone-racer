@@ -1,0 +1,4 @@
+obs_mode: mask
+image_channels: 1
+cnn_depth: 16
+mlp_units: 256

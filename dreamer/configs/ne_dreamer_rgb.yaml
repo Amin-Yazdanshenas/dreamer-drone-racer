@@ -1,0 +1,4 @@
+obs_mode: rgb
+image_channels: 3
+cnn_depth: 16
+mlp_units: 256

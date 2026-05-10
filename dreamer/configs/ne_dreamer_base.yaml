@@ -1,0 +1,62 @@
+# NE-Dreamer base config — overrides on top of dreamer_base.yaml defaults.
+# Load via: DreamerConfig.from_yaml("dreamer/configs/ne_dreamer_{obs_mode}.yaml")
+
+# NE-Dreamer transformer
+ne_hidden_dim: 256
+ne_num_layers: 2
+ne_num_heads: 4
+ne_dropout: 0.0
+ne_use_actions: true
+ne_use_same: false
+ne_use_next: true
+ne_predict_horizon: 1
+ne_horizon_discount: 0.9
+ne_loss_type: barlow
+ne_lambd: 5.0e-4
+ne_weight_same: 1.0
+ne_weight_next: 1.0
+
+# Repr loss weight (same field as R2-Dreamer's loss_scale_barlow)
+loss_scale_barlow: 0.05
+
+# Shared training settings (same as dreamer_base.yaml)
+h_dim: 2048
+stoch: 32
+discrete: 16
+hidden: 256
+blocks: 8
+obs_layers: 1
+img_layers: 2
+dyn_layers: 1
+
+beta_dyn: 0.5
+beta_rep: 0.1
+kl_free: 1.0
+
+imag_horizon: 15
+horizon: 333
+lam: 0.95
+entropy_scale: 3.0e-3
+entropy_min: 1.0
+slow_target_fraction: 0.02
+
+seq_len: 64
+batch_size: 16
+lr: 4.0e-5
+agc: 0.3
+pmin: 1.0e-3
+eps: 1.0e-20
+beta1: 0.9
+beta2: 0.999
+warmup: 1000
+
+warmup_steps: 2000
+update_every: 1
+n_grad_steps: 4
+replay_capacity: 2000000
+
+compile: true
+amp_dtype: bfloat16
+
+log_interval: 50
+save_interval: 200
