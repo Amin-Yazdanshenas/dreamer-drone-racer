@@ -229,17 +229,26 @@ def kl(post: MultiOneHotDist, prior: MultiOneHotDist,
         free: float = 0.0, balance: float = 0.8) -> torch.Tensor:
     """Balanced KL: balance * KL(post_sg || prior) + (1-balance) * KL(post || prior_sg).
 
-    free: free-nats threshold (clip KL below this value)
+    free: free-nats floor applied PER CATEGORY (not per sample total).
+    With stoch=32 cats, free=1.0 gives a 32-nat floor per sample, preventing
+    posterior collapse by ensuring each category contributes at least 1 nat of
+    information. Applying the floor to the total (which was the old behaviour)
+    gave a 32x weaker signal and caused full posterior collapse.
     """
-    # Detached versions
     post_sg_logits = post.logits.detach()
     prior_sg_logits = prior.logits.detach()
 
-    dyn_kl = MultiOneHotDist(post_sg_logits).kl(prior)   # KL(post_sg || prior)
-    rep_kl = MultiOneHotDist(post.logits).kl(MultiOneHotDist(prior_sg_logits))  # KL(post || prior_sg)
+    def _kl_per_cat(lp: torch.Tensor, lq: torch.Tensor) -> torch.Tensor:
+        p = F.softmax(lp, dim=-1)
+        log_p = F.log_softmax(lp, dim=-1)
+        log_q = F.log_softmax(lq, dim=-1)
+        return (p * (log_p - log_q)).sum(-1)  # (..., num_cats)
+
+    dyn_cats = _kl_per_cat(post_sg_logits, prior.logits)          # (..., num_cats)
+    rep_cats = _kl_per_cat(post.logits, prior_sg_logits)          # (..., num_cats)
 
     if free > 0.0:
-        dyn_kl = dyn_kl.clamp(min=free)
-        rep_kl = rep_kl.clamp(min=free)
+        dyn_cats = dyn_cats.clamp(min=free)
+        rep_cats = rep_cats.clamp(min=free)
 
-    return balance * dyn_kl + (1 - balance) * rep_kl
+    return balance * dyn_cats.sum(-1) + (1 - balance) * rep_cats.sum(-1)

@@ -19,7 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .distributions import MultiOneHotDist, TwoHot, kl as kl_loss, symexp, symlog
-from .networks import DroneEncoder, MLP, MLPHead, Projector, ReturnEMA
+from .networks import DroneEncoder, MLP, MLPHead, ReturnEMA
 from .optim import LaProp, clip_grad_agc_
 from .replay_buffer import SequenceReplayBuffer
 from .rssm import RSSM
@@ -63,6 +63,7 @@ class DreamerConfig:
     horizon: int = 333            # gamma = 1 - 1/333 ≈ 0.997
     lam: float = 0.95
     entropy_scale: float = 3e-4
+    entropy_min: float = 1.0       # floor: add penalty when H[π] drops below this
     slow_target_fraction: float = 0.02
 
     # Barlow Twins
@@ -309,10 +310,10 @@ class DreamerV3Agent:
         self.reward_head = MLPHead(latent_dim, 255, units=cfg.hidden, layers=2).to(self.device)
         self.cont_head = MLPHead(latent_dim, 1, units=cfg.hidden, layers=2).to(self.device)
 
-        # Barlow Twins projector
-        self.projector = Projector(
-            in_dim=embed_dim, proj_dim=cfg.mlp_units, hidden_dim=cfg.mlp_units
-        ).to(self.device)
+        # Barlow Twins projectors: one for RSSM latent, one for encoder embed.
+        # They project into the same shared dim so BT can align them.
+        self.projector_rssm = nn.Linear(latent_dim, cfg.mlp_units, bias=False).to(self.device)
+        self.projector_embed = nn.Linear(embed_dim, cfg.mlp_units, bias=False).to(self.device)
 
         # Actor and critics
         self.actor = Actor(latent_dim, cfg.action_dim, units=cfg.hidden, layers=4).to(self.device)
@@ -331,7 +332,8 @@ class DreamerV3Agent:
             + list(self.rssm.parameters())
             + list(self.reward_head.parameters())
             + list(self.cont_head.parameters())
-            + list(self.projector.parameters())
+            + list(self.projector_rssm.parameters())
+            + list(self.projector_embed.parameters())
         )
         self.opt_wm = LaProp(wm_params, lr=cfg.lr, betas=(cfg.beta1, cfg.beta2), eps=cfg.eps)
         self.opt_actor = LaProp(self.actor.parameters(), lr=cfg.lr,
@@ -459,7 +461,8 @@ class DreamerV3Agent:
             + list(self.rssm.parameters())
             + list(self.reward_head.parameters())
             + list(self.cont_head.parameters())
-            + list(self.projector.parameters()),
+            + list(self.projector_rssm.parameters())
+            + list(self.projector_embed.parameters()),
             clip=self.cfg.agc, pmin=self.cfg.pmin,
         )
         self._scaler.step(self.opt_wm)
@@ -524,15 +527,14 @@ class DreamerV3Agent:
         kl = kl_loss(post_dist, prior_dist, free=self.cfg.kl_free, balance=0.8)
         kl_mean = kl.mean()
 
-        # Barlow Twins auxiliary loss (two augmented views of same embedding)
-        # Use consecutive pairs (t, t+1) in sequence as two "views"
+        # Barlow Twins: align RSSM latent with encoder embedding.
+        # Forces the RSSM to predict what the encoder sees → provides the
+        # observation signal that replaces the image decoder in R2-Dreamer.
+        # Stop-grad on encoder side so only the RSSM projector is trained to match.
         embed_flat = embed.reshape(B * T, -1)
-        if T >= 2:
-            z1 = self.projector(embed_flat[:B * (T - 1)])
-            z2 = self.projector(embed_flat[B:])
-            bt_loss = barlow_twins_loss(z1, z2, lambd=self.cfg.barlow_lambd)
-        else:
-            bt_loss = embed_flat.new_zeros(1).squeeze()
+        z1 = self.projector_rssm(latent)                   # from RSSM (B*T, mlp_units)
+        z2 = self.projector_embed(embed_flat.detach())     # from encoder, stop-grad
+        bt_loss = barlow_twins_loss(z1, z2, lambd=self.cfg.barlow_lambd)
 
         total = (
             self.cfg.loss_scale_rew * rew_loss
@@ -592,11 +594,13 @@ class DreamerV3Agent:
         self.return_ema.update(targets)
         targets_norm = self.return_ema.normalize(targets)
 
-        # Actor loss
+        # Actor loss: maximise value + entropy bonus.
+        # entropy_min: if H[π] drops below this floor, add an extra push up.
         log_probs = lp_seq.reshape(HH * B2)
         entropy = -log_probs.mean()
+        entropy_bonus = entropy + F.relu(torch.tensor(self.cfg.entropy_min, device=entropy.device) - entropy)
         actor_loss = -targets_norm.reshape(HH * B2).mean()
-        actor_loss = actor_loss - self.cfg.entropy_scale * entropy
+        actor_loss = actor_loss - self.cfg.entropy_scale * entropy_bonus
 
         # Critic loss (twohot regression on stopped targets)
         targets_sg = targets.detach()
@@ -615,6 +619,7 @@ class DreamerV3Agent:
         metrics = {
             "actor/loss": actor_loss.item(),
             "actor/entropy": entropy.item(),
+            "actor/entropy_bonus": entropy_bonus.item(),
             "critic/loss": crit_loss.item(),
             "critic/repval_loss": repval_loss.item(),
             "imag/reward_mean": rewards.mean().item(),
@@ -633,7 +638,8 @@ class DreamerV3Agent:
         self.rssm.train()
         self.reward_head.train()
         self.cont_head.train()
-        self.projector.train()
+        self.projector_rssm.train()
+        self.projector_embed.train()
         self.actor.train()
         self.critic.train()
 
@@ -642,7 +648,8 @@ class DreamerV3Agent:
         self.rssm.eval()
         self.reward_head.eval()
         self.cont_head.eval()
-        self.projector.eval()
+        self.projector_rssm.eval()
+        self.projector_embed.eval()
         self.actor.eval()
         self.critic.eval()
 
@@ -657,7 +664,8 @@ class DreamerV3Agent:
             "rssm": self.rssm.state_dict(),
             "reward_head": self.reward_head.state_dict(),
             "cont_head": self.cont_head.state_dict(),
-            "projector": self.projector.state_dict(),
+            "projector_rssm": self.projector_rssm.state_dict(),
+            "projector_embed": self.projector_embed.state_dict(),
             "actor": self.actor.state_dict(),
             "critic": self.critic.state_dict(),
             "target_critic": self.target_critic.state_dict(),
@@ -676,8 +684,10 @@ class DreamerV3Agent:
         self.rssm.load_state_dict(ckpt["rssm"])
         self.reward_head.load_state_dict(ckpt["reward_head"])
         self.cont_head.load_state_dict(ckpt["cont_head"])
-        if "projector" in ckpt:
-            self.projector.load_state_dict(ckpt["projector"])
+        if "projector_rssm" in ckpt:
+            self.projector_rssm.load_state_dict(ckpt["projector_rssm"])
+        if "projector_embed" in ckpt:
+            self.projector_embed.load_state_dict(ckpt["projector_embed"])
         self.actor.load_state_dict(ckpt["actor"])
         self.critic.load_state_dict(ckpt["critic"])
         self.target_critic.load_state_dict(ckpt["target_critic"])
