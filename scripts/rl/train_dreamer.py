@@ -47,6 +47,12 @@ parser.add_argument(
 parser.add_argument("--num_envs", type=int, default=None, help="Override number of envs.")
 parser.add_argument("--max_steps", type=int, default=2_000_000, help="Total env steps.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Resume from .pt file.")
+parser.add_argument("--record_fpv", action="store_true", default=False,
+                    help="Record FPV camera for env 0; only keeps videos that pass ≥1 gate.")
+parser.add_argument("--render_interval", type=int, default=None,
+                    help="Physics steps between viewport renders. Default: 16 non-headless "
+                         "(smooth ~25 Hz viz without blocking sim), 100 headless (unused). "
+                         "Lower = smoother viewport but more sim stalls when training kicks in.")
 parser.add_argument("--config", type=str, default=None,
                     help="Path to dreamer YAML config (default: auto from obs_mode).")
 parser.add_argument("--seed", type=int, default=42)
@@ -146,6 +152,22 @@ def main():
         num_envs=args_cli.num_envs,
         use_fabric=True,
     )
+    # Decouple viewport render rate from sim/decimation. Default render_interval = decimation (4)
+    # means render every RL step → viewport blocks training when GPU is busy. Bump it to
+    # decimation*4 = 16 physics ticks (~25 Hz viewport at sim_dt=1/400) for smooth non-headless
+    # viz that doesn't stall sim; large value when headless since viewport is hidden anyway.
+    if args_cli.render_interval is not None:
+        env_cfg.sim.render_interval = args_cli.render_interval
+    elif getattr(args_cli, "headless", False):
+        env_cfg.sim.render_interval = 100
+    else:
+        env_cfg.sim.render_interval = env_cfg.decimation * 4
+    print(f"[Sim] render_interval={env_cfg.sim.render_interval} (sim.dt={env_cfg.sim.dt})")
+
+    if args_cli.record_fpv:
+        env_cfg.commands.target.record_fpv = True
+        print("[FPV] Recording enabled — only videos with ≥1 gate pass will be kept.")
+
     gym_env = gym.make(args_cli.task, cfg=env_cfg)
     env = DreamerIsaacEnvWrapper(gym_env, obs_mode=args_cli.obs_mode)
 
