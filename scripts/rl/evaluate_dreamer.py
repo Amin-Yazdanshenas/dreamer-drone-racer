@@ -21,6 +21,12 @@ parser.add_argument("--task", type=str, default="Isaac-Drone-Racer-Dreamer-Play-
 parser.add_argument(
     "--obs_mode", type=str, default="rgb", choices=["rgb", "mask", "rgb_mask"]
 )
+parser.add_argument(
+    "--agent", type=str, default="r2dreamer", choices=["r2dreamer", "ne_dreamer"],
+    help="Agent variant matching the checkpoint."
+)
+parser.add_argument("--stochastic", action="store_true", default=False,
+                    help="Sample actions instead of using tanh(mean).")
 parser.add_argument("--checkpoint", type=str, required=True, help="Path to .pt checkpoint.")
 parser.add_argument("--num_episodes", type=int, default=10, help="Episodes to evaluate.")
 parser.add_argument("--num_envs", type=int, default=1)
@@ -59,20 +65,32 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
 import tasks  # noqa: F401
-from dreamer import DreamerConfig, DreamerIsaacEnvWrapper, DreamerV3Agent
+from dreamer import DreamerConfig, DreamerIsaacEnvWrapper, DreamerV3Agent, NEDreamerV3Agent
 
 _OBS_MODE_TO_CONFIG = {
-    "rgb": "dreamer/configs/dreamer_rgb.yaml",
-    "mask": "dreamer/configs/dreamer_mask.yaml",
-    "rgb_mask": "dreamer/configs/dreamer_rgb_mask.yaml",
+    "r2dreamer": {
+        "rgb": "dreamer/configs/dreamer_rgb.yaml",
+        "mask": "dreamer/configs/dreamer_mask.yaml",
+        "rgb_mask": "dreamer/configs/dreamer_rgb_mask.yaml",
+    },
+    "ne_dreamer": {
+        "rgb": "dreamer/configs/ne_dreamer_rgb.yaml",
+        "mask": "dreamer/configs/ne_dreamer_mask.yaml",
+        "rgb_mask": "dreamer/configs/ne_dreamer_rgb_mask.yaml",
+    },
+}
+
+_AGENT_TO_BASE_CONFIG = {
+    "r2dreamer": "dreamer/configs/dreamer_base.yaml",
+    "ne_dreamer": "dreamer/configs/ne_dreamer_base.yaml",
 }
 
 
 def _load_config(args) -> DreamerConfig:
     import yaml
 
-    base_path = "dreamer/configs/dreamer_base.yaml"
-    mode_path = _OBS_MODE_TO_CONFIG[args.obs_mode]
+    base_path = _AGENT_TO_BASE_CONFIG[args.agent]
+    mode_path = _OBS_MODE_TO_CONFIG[args.agent][args.obs_mode]
     with open(base_path) as f:
         base = yaml.safe_load(f)
     with open(mode_path) as f:
@@ -113,8 +131,13 @@ def main():
     env = DreamerIsaacEnvWrapper(gym_env, obs_mode=args_cli.obs_mode)
     device = args_cli.device or "cuda"
 
-    agent = DreamerV3Agent(cfg, device=device)
+    if args_cli.agent == "ne_dreamer":
+        agent = NEDreamerV3Agent(cfg, device=device)
+    else:
+        agent = DreamerV3Agent(cfg, device=device)
     agent.load(args_cli.checkpoint)
+    # Skip warmup gating during eval — checkpoint may have step < warmup_steps if loaded early.
+    agent._step = max(agent._step, cfg.warmup_steps + 1)
     agent.eval_mode()
     agent.reset_carry(env.num_envs)
 
@@ -132,7 +155,11 @@ def main():
 
     while episodes_done < args_cli.num_episodes and simulation_app.is_running():
         with torch.no_grad():
-            action = agent.act(obs, deterministic=True)
+            action = agent.act(
+                obs,
+                is_first=obs["is_first"],
+                deterministic=not args_cli.stochastic,
+            )
 
         obs = env.step(action.cpu())
 

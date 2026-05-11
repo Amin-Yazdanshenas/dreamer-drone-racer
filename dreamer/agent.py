@@ -459,10 +459,12 @@ class DreamerV3Agent:
 
     @torch.no_grad()
     def act(self, obs: Dict[str, torch.Tensor],
-            is_first: Optional[torch.Tensor] = None) -> torch.Tensor:
+            is_first: Optional[torch.Tensor] = None,
+            deterministic: bool = False) -> torch.Tensor:
         """Return actions (N, action_dim). Updates internal RSSM carry.
 
-        During warmup, returns random actions.
+        During warmup, returns random actions (deterministic flag ignored).
+        deterministic=True: use tanh(mean), no Gaussian sampling — for eval/inference.
         obs["image"]: (N, H, W, C) uint8
         obs["state"]: (N, state_dim) float32
         is_first: (N,) bool — resets carry for done envs
@@ -505,6 +507,10 @@ class DreamerV3Agent:
             # Random action during warmup. Carry the SAME action we return so prev_action in the
             # next step matches what was actually applied to the environment.
             action = (torch.rand(N, self.cfg.action_dim, device=self.device) * 2 - 1)
+        elif deterministic:
+            with torch.autocast(device_type=self._amp_device, dtype=self._amp_dtype):
+                action = self.actor.act_deterministic(latent)
+            action = action.float()
         else:
             with torch.autocast(device_type=self._amp_device, dtype=self._amp_dtype):
                 action, _ = self.actor(latent)
