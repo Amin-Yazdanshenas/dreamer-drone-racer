@@ -52,7 +52,7 @@ class DroneRacerSceneCfg(InteractiveSceneCfg):
     robot: ArticulationCfg = FIVE_IN_DRONE.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
     # sensors
-    collision_sensor: ContactSensorCfg = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", debug_vis=True)
+    collision_sensor: ContactSensorCfg = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", debug_vis=False)
     imu = ImuCfg(prim_path="{ENV_REGEX_NS}/Robot/body", debug_vis=False)
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/body/camera",
@@ -173,7 +173,7 @@ class CommandsCfg:
         randomise_start=None,
         record_fpv=False,
         resampling_time_range=(1e9, 1e9),
-        debug_vis=True,
+        debug_vis=False,
     )
 
 

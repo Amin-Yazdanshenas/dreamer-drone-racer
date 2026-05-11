@@ -70,6 +70,14 @@ class SequenceReplayBuffer:
         self._episodes: deque = deque()
         self._total_steps: int = 0
 
+        # Cached sampling state — rebuilt only when self._episodes is mutated. Without this,
+        # sample() rebuilt list(deque), lengths array, and weights vector on every batch — O(N_eps)
+        # work per draw. With replay_capacity=2M and avg ep ~150 steps, N_eps ≈ 13K, so this used to
+        # dominate post-warmup wall-time. The dirty flag is flipped in _store_episode / eviction.
+        self._sample_cache_dirty: bool = True
+        self._episodes_list: list = []
+        self._weights: np.ndarray | None = None
+
     # ------------------------------------------------------------------
     # Add transitions
     # ------------------------------------------------------------------
@@ -134,6 +142,7 @@ class SequenceReplayBuffer:
         while self._total_steps > self.capacity and self._episodes:
             old = self._episodes.popleft()
             self._total_steps -= len(old["reward"])
+        self._sample_cache_dirty = True
 
     # ------------------------------------------------------------------
     # Sample — returns (B, T, ...) format (R2-Dreamer convention)
@@ -149,15 +158,25 @@ class SequenceReplayBuffer:
         if not self._can_sample(batch_size):
             return None
 
-        sequences = []
-        episodes = list(self._episodes)
-        # Weighted sampling by episode length
-        lengths = np.array([len(ep["reward"]) for ep in episodes], dtype=np.float32)
-        weights = lengths / lengths.sum()
+        # Rebuild sample-side cache only when episode set has changed since last sample.
+        if self._sample_cache_dirty or self._weights is None:
+            self._episodes_list = list(self._episodes)
+            lengths = np.array(
+                [len(ep["reward"]) for ep in self._episodes_list], dtype=np.float32
+            )
+            total = float(lengths.sum())
+            self._weights = (lengths / total) if total > 0 else None
+            self._sample_cache_dirty = False
 
-        for _ in range(batch_size):
-            ep_idx = np.random.choice(len(episodes), p=weights)
-            ep = episodes[ep_idx]
+        episodes = self._episodes_list
+        weights = self._weights
+
+        # Batched draw of episode indices — one numpy call instead of batch_size separate ones.
+        ep_indices = np.random.choice(len(episodes), size=batch_size, p=weights)
+
+        sequences = []
+        for ep_idx in ep_indices:
+            ep = episodes[int(ep_idx)]
             ep_len = len(ep["reward"])
             max_start = ep_len - self.seq_len
             start = np.random.randint(0, max_start + 1)

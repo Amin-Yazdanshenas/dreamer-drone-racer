@@ -178,7 +178,8 @@ def main():
     )
     ckpt_dir = os.path.join(log_dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
-    writer = SummaryWriter(log_dir=os.path.join(log_dir, "tensorboard"))
+    # flush_secs=30 (default 120) prevents large blocking flushes after long uptime.
+    writer = SummaryWriter(log_dir=os.path.join(log_dir, "tensorboard"), flush_secs=30)
     print(f"[DreamerV3] Logging to {log_dir}")
 
     # ----------------------------------------------------------------
