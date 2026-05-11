@@ -121,10 +121,26 @@ class GateTargetingCommand(CommandTerm):
         episode["Episode/success_rate"] = (self._laps_completed_episode > 0).float().mean()
 
     def _resample_command(self, env_ids: Sequence[int]):
-        # Release and reinitialize video writer only after the first iteration
+        # Release video writer for the previous episode of env 0. Only keep the video file if
+        # that episode actually passed at least one gate, otherwise delete it to avoid filling
+        # the disk with empty fly-around clips.
         if hasattr(self, "out") and self.cfg.record_fpv:
             self.out.release()
-            print(f"FPV video saved as fpv_{self.video_id}.mp4")
+            import os
+            src = f"fpv_{self.video_id}.mp4"
+            gates_this_ep = int(self._gates_passed_episode[0].item())
+            if gates_this_ep > 0:
+                dst = f"fpv_gates{gates_this_ep:02d}_v{self.video_id:04d}.mp4"
+                try:
+                    os.rename(src, dst)
+                    print(f"[FPV] Kept {dst} — episode passed {gates_this_ep} gate(s)")
+                except OSError as e:
+                    print(f"[FPV] Failed to rename {src}: {e}")
+            else:
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
             self.video_id += 1
 
         if self.cfg.record_fpv:
