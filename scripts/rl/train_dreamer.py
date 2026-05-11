@@ -195,6 +195,14 @@ def main():
     ep_lengths = torch.zeros(env.num_envs, dtype=torch.float32)
     ep_count = 0
 
+    # Rolling per-step diagnostics (logged every gate_pass_log_every env-steps).
+    # gate_pass_rate confirms gate-detection fix is working at the env level — should be > 0
+    # within a few thousand env-steps once policy starts heading toward gates.
+    gate_pass_log_every = max(1000, env.num_envs * 10)
+    gate_pass_window_passes = 0
+    gate_pass_window_steps = 0
+    last_gate_pass_log = step
+
     while step < args_cli.max_steps:
         # --- Collect ---
         with torch.no_grad():
@@ -215,7 +223,20 @@ def main():
         # Episode tracking
         ep_rewards += next_obs["reward"]
         ep_lengths += 1.0
-        ep_gates += next_obs["gate_passed"].float()
+        gp_now = next_obs["gate_passed"].float()
+        ep_gates += gp_now
+
+        # Per-step gate pass rate (sum over envs / env-steps in window) — independent of episode end.
+        gate_pass_window_passes += int(gp_now.sum().item())
+        gate_pass_window_steps += env.num_envs
+        if step - last_gate_pass_log >= gate_pass_log_every and gate_pass_window_steps > 0:
+            rate = gate_pass_window_passes / gate_pass_window_steps
+            writer.add_scalar("env/gate_pass_rate", rate, step)
+            writer.add_scalar("replay/buffer_size", len(replay), step)
+            writer.add_scalar("replay/num_episodes", replay.num_episodes, step)
+            gate_pass_window_passes = 0
+            gate_pass_window_steps = 0
+            last_gate_pass_log = step
         if done_mask.any():
             for i in done_mask.nonzero(as_tuple=True)[0]:
                 gates_i = ep_gates[i].item()

@@ -620,6 +620,11 @@ class DreamerV3Agent:
         prior_dist = MultiOneHotDist(prior_logits.reshape(B * T, self.cfg.stoch, self.cfg.discrete))
         kl = kl_loss(post_dist, prior_dist, free=self.cfg.kl_free, balance=0.8)
         kl_mean = kl.mean()
+        # Unclamped KL diagnostic: distinguishes "posterior collapsed and z carries no info"
+        # from "posterior diverges from prior but actual KL still under per-cat free floor".
+        # If kl_unclamped << kl_mean over a long horizon, posterior is collapsing.
+        with torch.no_grad():
+            kl_unclamped = post_dist.kl(prior_dist).mean()
 
         embed_flat = embed.reshape(B * T, -1)
         repr_loss = self._repr_loss(latent, embed_flat, data["action"], B, T)
@@ -631,12 +636,21 @@ class DreamerV3Agent:
             + self.cfg.loss_scale_barlow * repr_loss
         )
 
+        # Replay buffer reward stats — confirm +10 gate rewards are entering the batch.
+        rew_max = data["reward"].max().item()
+        rew_min = data["reward"].min().item()
+        rew_abs_mean = data["reward"].abs().mean().item()
+
         metrics = {
             "wm/rew_loss": rew_loss.item(),
             "wm/cont_loss": cont_loss.item(),
             "wm/kl": kl_mean.item(),
+            "wm/kl_unclamped": kl_unclamped.item(),
             self._repr_loss_metric_key: repr_loss.item(),
             "wm/total": total.item(),
+            "replay/reward_max": rew_max,
+            "replay/reward_min": rew_min,
+            "replay/reward_abs_mean": rew_abs_mean,
         }
         return total, metrics, post_stoch, deters
 
