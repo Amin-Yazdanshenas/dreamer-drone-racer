@@ -121,13 +121,20 @@ class RSSM(nn.Module):
         return stoch, deter
 
     def img_step(self, prev_stoch: torch.Tensor, prev_deter: torch.Tensor,
-                 action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                 action: torch.Tensor,
+                 reset_f: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Imagination step (prior only).
 
         Returns: (prior_logits, prior_stoch, new_deter)
         prior_logits: (B, stoch, discrete) — reshaped to 2D
+
+        reset_f: optional (B, 1) float mask. When provided, the action embedding is gated to
+        zero on reset positions so the bias term of action_embed cannot leak a constant signal
+        into a fresh episode's RSSM state.
         """
         a_emb = self.action_embed(action)                          # (B, h_dim)
+        if reset_f is not None:
+            a_emb = a_emb * (1 - reset_f)
         deter_inp = torch.cat([prev_stoch, a_emb], dim=-1)        # (B, z_dim + h_dim)
         new_deter = self.deter(deter_inp, prev_deter)              # (B, h_dim)
 
@@ -150,15 +157,18 @@ class RSSM(nn.Module):
         All stoch tensors are (B, z_dim), deter is (B, h_dim),
         logits are (B, stoch, discrete).
         """
+        reset_f: Optional[torch.Tensor] = None
         if reset is not None:
             reset_f = reset.float()
             if reset_f.dim() == 1:
                 reset_f = reset_f.unsqueeze(-1)
             prev_stoch = prev_stoch * (1 - reset_f)
             prev_deter = prev_deter * (1 - reset_f)
-            action = action * (1 - reset_f)
+            # Don't zero the raw action here — action_embed has a bias, so zero action leaks a
+            # constant bias vector. Instead pass reset_f to img_step so the EMBEDDED action is
+            # gated to zero.
 
-        prior_logits, prior_stoch, new_deter = self.img_step(prev_stoch, prev_deter, action)
+        prior_logits, prior_stoch, new_deter = self.img_step(prev_stoch, prev_deter, action, reset_f=reset_f)
 
         post_logits_flat = self.post_mlp(torch.cat([new_deter, embed], dim=-1))  # (B, z_dim)
         post_logits = post_logits_flat.reshape(-1, self.stoch, self.discrete)

@@ -64,6 +64,7 @@ class DreamerConfig:
     lam: float = 0.95
     entropy_scale: float = 3e-4
     entropy_min: float = 1.0       # floor: add penalty when H[π] drops below this
+    entropy_floor_weight: float = 1e-2  # weight on F.relu(entropy_min - entropy) floor penalty
     slow_target_fraction: float = 0.02
 
     # Barlow Twins
@@ -468,9 +469,6 @@ class DreamerV3Agent:
         """
         N = obs["state"].shape[0]
 
-        if self._step < self.cfg.warmup_steps:
-            return torch.rand(N, self.cfg.action_dim) * 2 - 1
-
         if self._carry is None or self._carry[0].shape[0] != N:
             self.reset_carry(N)
 
@@ -488,6 +486,10 @@ class DreamerV3Agent:
         state = obs["state"].to(self.device)
         obs_in = {"image": image, "state": state}
 
+        # Always step the RSSM forward — even during warmup. Otherwise _carry stays at zeros
+        # for the entire warmup phase, and the first real act() after warmup runs the RSSM
+        # mid-episode with zero history (is_first=False), producing a garbage latent for ~seq_len
+        # steps and polluting replay.
         with torch.autocast(device_type=self._amp_device, dtype=self._amp_dtype):
             embed = self.encoder(obs_in)
             reset_mask = is_first.to(self.device) if is_first is not None else None
@@ -499,9 +501,14 @@ class DreamerV3Agent:
         new_deter = new_deter.float()
         latent = torch.cat([new_deter, post_stoch], dim=-1)
 
-        with torch.autocast(device_type=self._amp_device, dtype=self._amp_dtype):
-            action, _ = self.actor(latent)
-        action = action.float()
+        if self._step < self.cfg.warmup_steps:
+            # Random action during warmup. Carry the SAME action we return so prev_action in the
+            # next step matches what was actually applied to the environment.
+            action = (torch.rand(N, self.cfg.action_dim, device=self.device) * 2 - 1)
+        else:
+            with torch.autocast(device_type=self._amp_device, dtype=self._amp_dtype):
+                action, _ = self.actor(latent)
+            action = action.float()
 
         self._carry = (post_stoch, new_deter, action)
         return action.cpu()
@@ -522,7 +529,7 @@ class DreamerV3Agent:
         self._update_count += 1
 
         # LR warmup: scale LR linearly for first `warmup` grad steps
-        if self._update_count <= self.cfg.warmup:
+        if self._update_count < self.cfg.warmup:
             lr_scale = self._update_count / self.cfg.warmup
             for opt in (self.opt_wm, self.opt_actor, self.opt_critic):
                 for pg in opt.param_groups:
@@ -676,12 +683,15 @@ class DreamerV3Agent:
         targets_norm = self.return_ema.normalize(targets)
 
         # Actor loss: maximise value + entropy bonus.
-        # entropy_min: if H[π] drops below this floor, add an extra push up.
+        # Use a SEPARATE floor-penalty term — the old `entropy + F.relu(min - entropy)` formulation
+        # algebraically collapses to a constant `entropy_min` when entropy < min, killing the gradient
+        # exactly when the policy needed it most. Now: baseline entropy bonus + extra penalty for
+        # dropping below the floor, both differentiable.
         log_probs = lp_seq.reshape(HH * B2)
         entropy = -log_probs.mean()
-        entropy_bonus = entropy + F.relu(torch.tensor(self.cfg.entropy_min, device=entropy.device) - entropy)
+        floor_pen = F.relu(torch.tensor(self.cfg.entropy_min, device=entropy.device) - entropy)
         actor_loss = -targets_norm.reshape(HH * B2).mean()
-        actor_loss = actor_loss - self.cfg.entropy_scale * entropy_bonus
+        actor_loss = actor_loss - self.cfg.entropy_scale * entropy + self.cfg.entropy_floor_weight * floor_pen
 
         # Critic loss (twohot regression on stopped targets)
         targets_sg = targets.detach()
@@ -700,7 +710,7 @@ class DreamerV3Agent:
         metrics = {
             "actor/loss": actor_loss.item(),
             "actor/entropy": entropy.item(),
-            "actor/entropy_bonus": entropy_bonus.item(),
+            "actor/floor_pen": floor_pen.item(),
             "critic/loss": crit_loss.item(),
             "critic/repval_loss": repval_loss.item(),
             "imag/reward_mean": rewards.mean().item(),

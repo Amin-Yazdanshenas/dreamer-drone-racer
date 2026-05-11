@@ -103,13 +103,28 @@ class SequenceReplayBuffer:
             self._ep_bufs[i].append(step)
 
             if last_np[i]:
-                if len(self._ep_bufs[i]) >= self.seq_len:
-                    ep = self._ep_bufs[i].flush()
-                    if ep is not None:
-                        self._store_episode(ep)
-                else:
-                    # Too short — discard but clear so next episode is clean
-                    self._ep_bufs[i].flush()
+                # Pad short episodes to seq_len by repeating the terminal frame so crash/early-
+                # termination episodes still contribute their reward signal to the buffer.
+                # Without this, early-training crashes (very common) silently disappeared and
+                # the reward head never saw the terminal/crash signal — return/scale stuck at 1.0.
+                cur_len = len(self._ep_bufs[i])
+                if 0 < cur_len < self.seq_len:
+                    pad = self.seq_len - cur_len
+                    data = self._ep_bufs[i]._data
+                    for k, lst in data.items():
+                        last = lst[-1]
+                        for _ in range(pad):
+                            if k == "reward":
+                                lst.append(np.zeros_like(last))
+                            elif k == "is_first":
+                                lst.append(np.zeros_like(last))
+                            elif k == "is_last":
+                                lst.append(np.ones_like(last))
+                            else:
+                                lst.append(last.copy() if hasattr(last, "copy") else last)
+                ep = self._ep_bufs[i].flush()
+                if ep is not None:
+                    self._store_episode(ep)
 
     def _store_episode(self, episode: Dict[str, np.ndarray]) -> None:
         ep_len = len(episode["reward"])

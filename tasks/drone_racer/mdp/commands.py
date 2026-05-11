@@ -133,6 +133,15 @@ class GateTargetingCommand(CommandTerm):
         self._gates_passed_episode[env_ids] = 0
         self._laps_completed_episode[env_ids] = 0
 
+        # Clear accumulators and sync prev_pos for reset envs.
+        # Without this, the drone teleport can appear to cross the gate plane
+        # (old pos → new pos), creating a ghost gate pass/miss that sticks
+        # in the OR-accumulator and corrupts the reward and gate_passed signal.
+        self._gate_passed_accum[env_ids] = False
+        self._gate_missed_accum[env_ids] = False
+        self.prev_robot_pos_w = self.prev_robot_pos_w.clone()
+        self.prev_robot_pos_w[env_ids] = self.robot.data.root_pos_w[env_ids]
+
         if self.cfg.randomise_start is None:
             self.next_gate_idx[env_ids] = 0
 
@@ -182,15 +191,17 @@ class GateTargetingCommand(CommandTerm):
         next_gate_orientations = self.track.data.object_quat_w[self.env_ids, self.next_gate_idx]
         self.next_gate_w = torch.cat([next_gate_positions, next_gate_orientations], dim=1)
 
-        # Gate passing logic
-        (roll, pitch, yaw) = math_utils.euler_xyz_from_quat(self.next_gate_w[:, 3:7])
-        normal = torch.stack([torch.cos(yaw), torch.sin(yaw)], dim=1)
-        pos_old_projected = (self.prev_robot_pos_w[:, 0] - self.next_gate_w[:, 0]) * normal[:, 0] + (
-            self.prev_robot_pos_w[:, 1] - self.next_gate_w[:, 1]
-        ) * normal[:, 1]
-        pos_new_projected = (self.robot.data.root_pos_w[:, 0] - self.next_gate_w[:, 0]) * normal[:, 0] + (
-            self.robot.data.root_pos_w[:, 1] - self.next_gate_w[:, 1]
-        ) * normal[:, 1]
+        # Gate passing logic — full 3D plane crossing using quaternion-rotated x-axis as normal.
+        # Old code used yaw-only 2D normal, which (a) failed on tilted gates and (b) dropped z entirely,
+        # so a drone flying ABOVE the gate could trigger a plane crossing and accumulate a ghost
+        # gate_missed via the bbox check. Now we project the full 3D rel-pos onto the gate normal.
+        x_axis = torch.tensor([[1.0, 0.0, 0.0]], device=self.device).expand(self.num_envs, 3)
+        gate_normal = math_utils.quat_apply(self.next_gate_w[:, 3:7], x_axis)  # (N, 3)
+
+        rel_old = self.prev_robot_pos_w - self.next_gate_w[:, :3]
+        rel_new = self.robot.data.root_pos_w - self.next_gate_w[:, :3]
+        pos_old_projected = (rel_old * gate_normal).sum(dim=-1)
+        pos_new_projected = (rel_new * gate_normal).sum(dim=-1)
         passed_gate_plane = (pos_old_projected < 0) & (pos_new_projected > 0)
 
         # Accumulate with OR so gate passes at any physics sub-step are captured.

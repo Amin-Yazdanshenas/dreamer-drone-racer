@@ -45,7 +45,10 @@ def reset_after_prev_gate(
     offset_world = math_utils.quat_apply(gate_quat, offset)
     pos_after_prev_gate = gate_pos + offset_world
 
-    positions = root_states[:, 0:3] + env.scene.env_origins[env_ids] + pos_after_prev_gate + rand_samples[:, 0:3]
+    # pos_after_prev_gate is already in world frame (built from world-frame gate_pos + world offset).
+    # Adding root_states[:, 0:3] (asset local default, e.g. (0,0,1)) would offset the drone by the
+    # default-hover height again — unintended. Use env origins + gate-relative spawn only.
+    positions = env.scene.env_origins[env_ids] + pos_after_prev_gate + rand_samples[:, 0:3]
     orientations_delta = math_utils.quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5])
     orientations = math_utils.quat_mul(root_states[:, 3:7], orientations_delta)
 
