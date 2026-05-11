@@ -151,16 +151,18 @@ class EventCfg:
         },
     )
 
-    # intervals
-    push_robot = EventTerm(
-        func=mdp.apply_external_force_torque,
-        mode="interval",
-        interval_range_s=(0.0, 0.2),
-        params={
-            "force_range": (-0.1, 0.1),
-            "torque_range": (-0.05, 0.05),
-        },
-    )
+    # intervals — push_robot disabled during early training: random forces destabilize the
+    # untrained policy, cascade crashes, and the resulting reset spikes stall the viewport.
+    # Re-enable for domain-randomization once the policy can fly stably.
+    # push_robot = EventTerm(
+    #     func=mdp.apply_external_force_torque,
+    #     mode="interval",
+    #     interval_range_s=(0.0, 0.2),
+    #     params={
+    #         "force_range": (-0.1, 0.1),
+    #         "torque_range": (-0.05, 0.05),
+    #     },
+    # )
 
 
 @configclass
@@ -193,7 +195,9 @@ class TerminationsCfg:
     """Termination terms for the MDP."""
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    flyaway = DoneTerm(func=mdp.flyaway, params={"command_name": "target", "distance": 20.0})
+    # flyaway distance bumped 20 → 50 m so a single overshoot doesn't immediately terminate.
+    # Cuts reset cascade rate during early training; re-tighten once policy is competent.
+    flyaway = DoneTerm(func=mdp.flyaway, params={"command_name": "target", "distance": 50.0})
     collision = DoneTerm(
         func=mdp.illegal_contact, params={"sensor_cfg": SceneEntityCfg("collision_sensor"), "threshold": 0.01}
     )
