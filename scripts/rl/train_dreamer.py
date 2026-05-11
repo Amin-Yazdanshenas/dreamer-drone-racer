@@ -47,8 +47,6 @@ parser.add_argument(
 parser.add_argument("--num_envs", type=int, default=None, help="Override number of envs.")
 parser.add_argument("--max_steps", type=int, default=2_000_000, help="Total env steps.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Resume from .pt file.")
-parser.add_argument("--record_fpv", action="store_true", default=False,
-                    help="Record FPV camera for env 0; only keeps videos that pass ≥1 gate.")
 parser.add_argument("--config", type=str, default=None,
                     help="Path to dreamer YAML config (default: auto from obs_mode).")
 parser.add_argument("--seed", type=int, default=42)
@@ -148,9 +146,6 @@ def main():
         num_envs=args_cli.num_envs,
         use_fabric=True,
     )
-    if args_cli.record_fpv:
-        env_cfg.commands.target.record_fpv = True
-        print("[FPV] Recording enabled — only videos with ≥1 gate pass will be kept.")
     gym_env = gym.make(args_cli.task, cfg=env_cfg)
     env = DreamerIsaacEnvWrapper(gym_env, obs_mode=args_cli.obs_mode)
 
