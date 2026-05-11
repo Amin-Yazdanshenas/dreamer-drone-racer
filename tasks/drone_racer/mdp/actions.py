@@ -178,6 +178,7 @@ class CTBRAction(ActionTerm):
             device=self.device, dtype=torch.float32,
         )
         self._max_thrust: float = g["max_thrust"]
+        self._hover_thrust: float = g["hover_thrust"]
 
         # Max torques: roll/pitch from arm+thrust, yaw from drag
         arm_eff = cfg.arm_length / math.sqrt(2.0)
@@ -193,6 +194,7 @@ class CTBRAction(ActionTerm):
         self._omega_des = torch.zeros(self.num_envs, 3, device=self.device)
         self._collective = torch.zeros(self.num_envs, device=self.device)
         self._prev_ang_vel = torch.zeros(self.num_envs, 3, device=self.device)
+        self._prev_err = torch.zeros(self.num_envs, 3, device=self.device)
         self._thrust_buf = torch.zeros(self.num_envs, 1, 3, device=self.device)
         self._moment_buf = torch.zeros(self.num_envs, 1, 3, device=self.device)
 
@@ -214,16 +216,31 @@ class CTBRAction(ActionTerm):
 
     def process_actions(self, actions: torch.Tensor) -> None:
         self._raw_actions[:] = actions.clamp(-1.0, 1.0)
-        self._collective[:] = (self._raw_actions[:, 0] + 1.0) * 0.5 * self._max_thrust
+        # Asymmetric linear map: c=0 → hover_thrust, c=+1 → max_thrust, c=-1 → 0.
+        # The old map ((c+1)/2)*max_thrust put hover at c=-0.5, so an untrained Gaussian-mean-zero
+        # policy commanded 2× hover thrust at every step → drone climbed to flyaway. Centering
+        # neutral action on hover lets a near-zero policy at least hold altitude while it learns.
+        c = self._raw_actions[:, 0]
+        self._collective[:] = (
+            self._hover_thrust
+            + torch.where(
+                c >= 0,
+                c * (self._max_thrust - self._hover_thrust),
+                c * self._hover_thrust,
+            )
+        ).clamp(min=0.0)
         self._omega_des[:] = self._raw_actions[:, 1:] * self._max_rates
         log(self._env, ["c", "wx_des", "wy_des", "wz_des"], self._raw_actions)
 
     def apply_actions(self) -> None:
         omega_cur = self._robot.data.root_ang_vel_b          # (N, 3) body frame
-        domega = (omega_cur - self._prev_ang_vel) / self._dt  # angular accel estimate
 
+        # PD on rate error (correct PD form). Old code computed -kd * d(omega_cur)/dt which only
+        # coincides with -kd * d(err)/dt when omega_des is held constant — fails at every RL
+        # decimation boundary where omega_des steps. Track err derivative directly.
         err = self._omega_des - omega_cur
-        tau = self._kp * err - self._kd * domega
+        derr_dt = (err - self._prev_err) / self._dt
+        tau = self._kp * err + self._kd * derr_dt
         tau = tau.clamp(-self._tau_max, self._tau_max)
 
         self._thrust_buf[:, 0, 2] = self._collective
@@ -232,6 +249,7 @@ class CTBRAction(ActionTerm):
             self._thrust_buf, self._moment_buf, body_ids=self._body_id
         )
         self._prev_ang_vel[:] = omega_cur
+        self._prev_err[:] = err
 
     def reset(self, env_ids) -> None:
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -240,6 +258,7 @@ class CTBRAction(ActionTerm):
         self._omega_des[env_ids] = 0.0
         self._collective[env_ids] = 0.0
         self._prev_ang_vel[env_ids] = 0.0
+        self._prev_err[env_ids] = 0.0
         self._robot.reset(env_ids)
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]

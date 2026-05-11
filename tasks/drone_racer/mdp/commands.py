@@ -162,13 +162,16 @@ class GateTargetingCommand(CommandTerm):
                 env=self._env,
                 env_ids=env_ids,
                 gate_pose=gate_w,
+                # Tightened from ±0.5 m / ±45° to keep the spawn inside the next gate's z-bbox
+                # (half-size 0.75 m) and the drone near level so it doesn't diverge before the
+                # rate controller can react. Re-widen once policy is competent (curriculum).
                 pose_range={
-                    "x": (-0.5, 0.5),
-                    "y": (-0.5, 0.5),
-                    "z": (-0.5, 0.5),
-                    "roll": (-torch.pi / 4, torch.pi / 4),
-                    "pitch": (-torch.pi / 4, torch.pi / 4),
-                    "yaw": (-torch.pi / 4, torch.pi / 4),
+                    "x": (-0.2, 0.2),
+                    "y": (-0.2, 0.2),
+                    "z": (-0.2, 0.2),
+                    "roll": (-0.1, 0.1),    # ±5.7°
+                    "pitch": (-0.1, 0.1),
+                    "yaw": (-0.3, 0.3),     # ±17°
                 },
                 velocity_range={
                     "x": (0.0, 0.0),
