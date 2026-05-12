@@ -695,12 +695,23 @@ class LegacyTerminationsCfg:
 
 @configclass
 class LegacyRewardsCfg:
-    """Upstream reward weights — known to converge with skrl-PPO."""
+    """Upstream reward weights AND function behavior (symmetric progress + miss penalty)."""
 
     terminating = RewTerm(func=mdp.is_terminated, weight=-500.0)
     ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.0001)
-    progress = RewTerm(func=mdp.progress, weight=20.0, params={"command_name": "target"})
-    gate_passed = RewTerm(func=mdp.gate_passed, weight=400.0, params={"command_name": "target"})
+    # asymmetric=False → signed progress (negative for retreat). PPO needs this gradient
+    # to push policy away from bad actions; without it std explodes.
+    progress = RewTerm(
+        func=mdp.progress,
+        weight=20.0,
+        params={"command_name": "target", "asymmetric": False},
+    )
+    # penalize_miss=True → upstream behavior: +1 pass / -1 miss.
+    gate_passed = RewTerm(
+        func=mdp.gate_passed,
+        weight=400.0,
+        params={"command_name": "target", "penalize_miss": True},
+    )
     lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.1, params={"command_name": "target", "std": 0.5})
 
 

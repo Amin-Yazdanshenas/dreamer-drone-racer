@@ -77,13 +77,16 @@ def progress(
     env: ManagerBasedRLEnv,
     command_name: str,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asymmetric: bool = True,
 ) -> torch.Tensor:
-    """Asymmetric progress reward: only reward forward progress, no penalty for retreating.
+    """Progress toward target gate (prev_distance - current_distance).
 
-    Symmetric `prev_dist - cur_dist` is double-edged — random initial direction means 50% of
-    the time the drone is punished for moving, expected gradient ~0, policy converges to
-    "hover and don't crash" local optimum. Clamping to >=0 makes the signal one-sided so even
-    noisy exploration learns to move toward the gate.
+    asymmetric=True (default): clamp to >=0 — only reward forward progress. Used by Dreamer;
+    helps under-trained policies escape "hover" local optimum.
+
+    asymmetric=False: signed (negative when retreating). Required by legacy PPO tasks —
+    PPO needs the negative gradient to push policy away from bad actions; without it
+    std explodes and policy never commits to gate-passing.
     """
     asset: RigidObject = env.scene[asset_cfg.name]
 
@@ -95,15 +98,24 @@ def progress(
     current_distance = torch.norm(current_pos - target_pos, dim=1)
 
     progress = prev_distance - current_distance
-    return progress.clamp(min=0.0)
+    if asymmetric:
+        progress = progress.clamp(min=0.0)
+    return progress
 
 
 def gate_passed(
     env: ManagerBasedRLEnv,
     command_name: str | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    penalize_miss: bool = False,
 ) -> torch.Tensor:
     """Reward for passing the current target gate, computed INLINE.
+
+    penalize_miss=False (default): +1 when drone passes through bbox center, 0 otherwise.
+    Used by Dreamer; avoids "gate area = dangerous" learning trap.
+
+    penalize_miss=True: +1 for pass, -1 for plane-crossing-while-off-center. Required by
+    legacy PPO tasks (upstream behavior).
 
     Isaac Lab calls reward_manager BEFORE command_manager (manager_based_rl_env.py:208 vs 232),
     so reading cmd.gate_passed (filled by _update_command in command_manager.compute) at reward
@@ -137,12 +149,9 @@ def gate_passed(
     out_bbox = torch.any(abs_diff > half_size, dim=1)
 
     passed = crossing & in_bbox
-    # Asymmetric: only reward successful passes, do NOT penalize misses.
-    # Penalizing crossings-while-off-center makes the drone treat the gate area as dangerous
-    # (since missing is much more common than passing during early training), and the policy
-    # learns to AVOID gates entirely. Same philosophy as the asymmetric progress reward.
-    # Variable `out_bbox` no longer used here but kept above as a comment to document the logic.
-    _ = out_bbox  # silence linter
+    if penalize_miss:
+        missed = crossing & out_bbox & ~passed
+        return passed.float() - missed.float()
     return passed.float()
 
 
