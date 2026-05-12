@@ -732,6 +732,12 @@ class DroneRacerEnvCfg_NoCam_Legacy_PLAY(DroneRacerEnvCfg_NoCam_PLAY):
     rewards: LegacyRewardsCfg = LegacyRewardsCfg()
     terminations: LegacyTerminationsCfg = LegacyTerminationsCfg()
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Upstream PLAY behavior: no camera, no IMU. Lets the user run without --enable_cameras.
+        self.scene.tiled_camera = None
+        self.scene.imu = None
+
 
 @configclass
 class DroneRacerEnvCfg_NoCam_CTBR_Legacy(DroneRacerEnvCfg_NoCam_CTBR):
@@ -749,3 +755,8 @@ class DroneRacerEnvCfg_NoCam_CTBR_Legacy_PLAY(DroneRacerEnvCfg_NoCam_CTBR_PLAY):
     events: LegacyEventCfg = LegacyEventCfg()
     rewards: LegacyRewardsCfg = LegacyRewardsCfg()
     terminations: LegacyTerminationsCfg = LegacyTerminationsCfg()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.scene.tiled_camera = None
+        self.scene.imu = None
