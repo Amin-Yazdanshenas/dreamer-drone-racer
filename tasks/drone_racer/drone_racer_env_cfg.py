@@ -183,25 +183,19 @@ class CommandsCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
-    # Early-training reward shaping:
-    # - terminating softened −4 → −2 so policy isn't afraid to move (less crash-aversion).
-    # - ang_vel_l2 disabled (was −0.001): tiny but adds noise; re-enable once policy is stable.
-    # - progress: asymmetric (only positive, see rewards.progress) × weight 100 (was 20).
-    #   At 2M env-steps the drone hovers post-gate-1 instead of chasing gate 2 — the post-gate
-    #   bootstrap value didn't exceed the cost-of-moving. Bumping progress 5× gives a stronger
-    #   one-sided shaping signal during the multi-gate-chain phase. Will dominate hover policy.
-    # - gate_passed boosted 10 → 30: when a gate IS passed, the reward dominates exploration so
-    #   the actor strongly prefers gate-passing behaviour over hovering near the spawn.
-    # - lookat_next kept small as a heading prior.
+    # Reward shaping (post-2.8M env-step diagnostic): progress weight=100 BACKFIRED — drone
+    # learned to exploit drift toward target as a steady reward source, treating gate-passing as
+    # too risky for marginal extra reward. Gate pass rate dropped 8× between 2.0M and 2.8M.
+    # Solution: shrink progress shaping and grow the gate spike so gate-passing dominates.
+    # - terminating −2 (unchanged): crash penalty
+    # - ang_vel_l2 disabled (re-enable post-training)
+    # - progress weight 100 → 10: cap accumulated drift reward to ~5 over long episodes
+    # - gate_passed 3000 → 10000: per-pass spike now +100 (10× bigger than max drift reward)
+    # - lookat_next kept small
     terminating = RewTerm(func=mdp.is_terminated, weight=-2.0)
     ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=0.0)
-    progress = RewTerm(func=mdp.progress, weight=100.0, params={"command_name": "target"})
-    # gate_passed weight 30 → 3000: Isaac Lab multiplies reward terms by dt (=0.01 s/step at
-    # decimation=4, sim_dt=1/400). With weight=30 the actual gate-pass spike was only 0.3 per
-    # step — much smaller than the cumulative progress reward over an episode (a drone slowly
-    # drifting toward the gate ends up earning more than one that actually passes through).
-    # Bumping to 3000 makes each gate event deliver a true +30 spike that dominates progress.
-    gate_passed = RewTerm(func=mdp.gate_passed, weight=3000.0, params={"command_name": "target"})
+    progress = RewTerm(func=mdp.progress, weight=10.0, params={"command_name": "target"})
+    gate_passed = RewTerm(func=mdp.gate_passed, weight=10000.0, params={"command_name": "target"})
     lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.5, params={"command_name": "target", "std": 0.5})
 
 
