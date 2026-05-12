@@ -233,6 +233,20 @@ def main():
 
         next_obs = env.step(actions.cpu())
 
+        # DEBUG: when gate_passed observation is True, log the reward the env returned for that
+        # transition. If reward is NOT ~+30 (the gate_passed RewTerm weight) when gate_passed=True,
+        # the reward pipeline is broken and the +30 isn't reaching replay.
+        gp = next_obs["gate_passed"]
+        if gp.any():
+            idx = gp.nonzero(as_tuple=True)[0]
+            rew_vals = next_obs["reward"][idx]
+            print(
+                f"[GATE-PASS] step={step}  envs={idx.tolist()}  "
+                f"reward={[round(float(v), 3) for v in rew_vals]}  "
+                f"is_last={[bool(next_obs['is_last'][i].item()) for i in idx]}",
+                flush=True,
+            )
+
         replay.add(
             obs,
             actions.cpu(),
