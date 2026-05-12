@@ -69,8 +69,9 @@ def reset_after_prev_gate(
     # Add per-env world-frame initial linear velocity bias (e.g. toward next gate) so the drone
     # spawns already moving in the right direction — gives an untrained policy useful gradient
     # data without relying on lucky random rate noise to break it out of rest.
+    # initial_lin_vel_world is sized (num_envs, 3); index by env_ids to match `velocities` rows.
     if initial_lin_vel_world is not None:
-        velocities[:, 0:3] = velocities[:, 0:3] + initial_lin_vel_world
+        velocities[:, 0:3] = velocities[:, 0:3] + initial_lin_vel_world[env_ids]
 
     # set into the physics simulation
     asset.write_root_pose_to_sim(torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
