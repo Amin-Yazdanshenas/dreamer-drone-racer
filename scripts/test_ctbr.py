@@ -40,8 +40,8 @@ parser.add_argument(
 parser.add_argument(
     "--steps",
     type=int,
-    default=200,
-    help="Number of RL steps per phase (at 100 Hz RL rate = 2 s per phase).",
+    default=100,
+    help="Number of RL steps per phase (at 100 Hz RL rate = 1 s per phase).",
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -184,10 +184,17 @@ def main():
         num_envs=args_cli.num_envs,
         use_fabric=True,
     )
-    # Disable curriculum/random spawn quirks for clean tests — spawn at gate 0 with no noise.
-    env_cfg.commands.target.spawn_lerp_alpha = 0.0
+    # Test isolation: spawn drone halfway between gates (away from gate frames) and disable
+    # collision/flyaway terminations so the drone keeps the commanded action for the full phase
+    # duration instead of getting reset mid-test by gate-frame propeller contact.
+    env_cfg.commands.target.spawn_lerp_alpha = 0.5
     env_cfg.commands.target.spawn_forward_velocity = 0.0
     env_cfg.commands.target.randomise_start = False
+    # Keep only timeout termination — drop crash + flyaway so the controller has time to settle.
+    env_cfg.terminations.collision = None
+    env_cfg.terminations.flyaway = None
+    # Stretch episode long enough to easily fit the per-phase window.
+    env_cfg.episode_length_s = 60.0
 
     # Bypass gym wrappers — they can silently coerce/drop actions. Use the raw Isaac Lab env.
     env = ManagerBasedRLEnv(cfg=env_cfg)
