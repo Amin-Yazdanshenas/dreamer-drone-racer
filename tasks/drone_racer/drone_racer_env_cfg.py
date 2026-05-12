@@ -194,7 +194,12 @@ class RewardsCfg:
     terminating = RewTerm(func=mdp.is_terminated, weight=-2.0)
     ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=0.0)
     progress = RewTerm(func=mdp.progress, weight=20.0, params={"command_name": "target"})
-    gate_passed = RewTerm(func=mdp.gate_passed, weight=30.0, params={"command_name": "target"})
+    # gate_passed weight 30 → 3000: Isaac Lab multiplies reward terms by dt (=0.01 s/step at
+    # decimation=4, sim_dt=1/400). With weight=30 the actual gate-pass spike was only 0.3 per
+    # step — much smaller than the cumulative progress reward over an episode (a drone slowly
+    # drifting toward the gate ends up earning more than one that actually passes through).
+    # Bumping to 3000 makes each gate event deliver a true +30 spike that dominates progress.
+    gate_passed = RewTerm(func=mdp.gate_passed, weight=3000.0, params={"command_name": "target"})
     lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.5, params={"command_name": "target", "std": 0.5})
 
 
