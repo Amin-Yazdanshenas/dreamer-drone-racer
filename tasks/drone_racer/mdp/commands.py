@@ -141,14 +141,13 @@ class GateTargetingCommand(CommandTerm):
         self._gates_passed_episode[env_ids] = 0
         self._laps_completed_episode[env_ids] = 0
 
-        # Clear accumulators and sync prev_pos for reset envs.
-        # Without this, the drone teleport can appear to cross the gate plane
-        # (old pos → new pos), creating a ghost gate pass/miss that sticks
-        # in the OR-accumulator and corrupts the reward and gate_passed signal.
+        # Clear accumulators for reset envs. We DELAY syncing prev_robot_pos_w until AFTER
+        # reset_after_prev_gate has written the new spawn pose to physics — otherwise
+        # prev_pos captures the crashed pose and root_pos_w becomes the spawn pose, so the
+        # later _update_command sees prev != current and triggers a ghost gate crossing.
         self._gate_passed_accum[env_ids] = False
         self._gate_missed_accum[env_ids] = False
         self.prev_robot_pos_w = self.prev_robot_pos_w.clone()
-        self.prev_robot_pos_w[env_ids] = self.robot.data.root_pos_w[env_ids]
 
         if self.cfg.randomise_start is None:
             self.next_gate_idx[env_ids] = 0
@@ -212,6 +211,11 @@ class GateTargetingCommand(CommandTerm):
                 },
                 asset_cfg_name=self.cfg.asset_name,
             )
+
+        # Snapshot prev_pos AFTER any pose write done by reset_after_prev_gate. For the
+        # randomise_start=None branch (no respawn), root_pos_w is unchanged so this just
+        # re-syncs to the current value, which is also correct.
+        self.prev_robot_pos_w[env_ids] = self.robot.data.root_pos_w[env_ids]
 
     def _update_command(self):
         if self.cfg.record_fpv:
