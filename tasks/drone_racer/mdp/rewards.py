@@ -78,9 +78,13 @@ def progress(
     command_name: str,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Penalize asset pos from its target pos using L2 squared kernel."""
+    """Asymmetric progress reward: only reward forward progress, no penalty for retreating.
 
-    # extract the used quantities (to enable type-hinting)
+    Symmetric `prev_dist - cur_dist` is double-edged — random initial direction means 50% of
+    the time the drone is punished for moving, expected gradient ~0, policy converges to
+    "hover and don't crash" local optimum. Clamping to >=0 makes the signal one-sided so even
+    noisy exploration learns to move toward the gate.
+    """
     asset: RigidObject = env.scene[asset_cfg.name]
 
     target_pos = env.command_manager.get_term(command_name).command[:, :3]
@@ -91,8 +95,7 @@ def progress(
     current_distance = torch.norm(current_pos - target_pos, dim=1)
 
     progress = prev_distance - current_distance
-
-    return progress
+    return progress.clamp(min=0.0)
 
 
 def gate_passed(
