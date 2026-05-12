@@ -602,3 +602,39 @@ class DroneRacerEnvCfg_Dreamer_PLAY(ManagerBasedRLEnvCfg):
         self.viewer.lookat = (0.0, 0.0, 0.0)
         self.sim.dt = 1 / 400
         self.sim.render_interval = self.decimation
+
+
+# ============================================================
+# CTBR-action variants for skrl-PPO sanity test
+# ============================================================
+# Inherit the existing skrl/PPO obs configs but swap ActionsCfg → DreamerActionsCfg so the
+# action term is CTBRActionCfg (collective + body rates). action_dim stays 4. Reuses the
+# existing skrl_cfg.yaml / skrl_cfg_nocam.yaml — same PPO network shapes.
+
+
+@configclass
+class DroneRacerEnvCfg_CTBR(DroneRacerEnvCfg):
+    """Camera + IMU asymmetric AC, CTBR action."""
+
+    actions: DreamerActionsCfg = DreamerActionsCfg()
+
+
+@configclass
+class DroneRacerEnvCfg_CTBR_PLAY(DroneRacerEnvCfg_PLAY):
+    """Camera + IMU eval, CTBR action."""
+
+    actions: DreamerActionsCfg = DreamerActionsCfg()
+
+
+@configclass
+class DroneRacerEnvCfg_NoCam_CTBR(DroneRacerEnvCfg_NoCam):
+    """Ground-truth-only training, CTBR action — fastest sanity test."""
+
+    actions: DreamerActionsCfg = DreamerActionsCfg()
+
+
+@configclass
+class DroneRacerEnvCfg_NoCam_CTBR_PLAY(DroneRacerEnvCfg_NoCam_PLAY):
+    """Ground-truth-only eval, CTBR action."""
+
+    actions: DreamerActionsCfg = DreamerActionsCfg()

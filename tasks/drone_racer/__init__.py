@@ -108,3 +108,47 @@ gym.register(
         "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_Dreamer_PLAY",
     },
 )
+
+# ============================================================
+# CTBR-action skrl-PPO variants (sanity test that CTBR controller works
+# end-to-end with a known-good training algorithm)
+# ============================================================
+gym.register(
+    id="Isaac-Drone-Racer-CTBR-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_CTBR",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Drone-Racer-CTBR-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_CTBR_PLAY",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Drone-Racer-NoCam-CTBR-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_NoCam_CTBR",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_nocam.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Drone-Racer-NoCam-CTBR-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_NoCam_CTBR_PLAY",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_nocam.yaml",
+    },
+)
