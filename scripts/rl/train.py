@@ -104,6 +104,12 @@ from isaaclab.utils.io import dump_yaml
 from isaaclab_rl.skrl import SkrlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
+# Ensure repo root is on sys.path so `import tasks` resolves to the local task package.
+from pathlib import Path
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import tasks  # noqa: F401
 
 # config shortcuts
