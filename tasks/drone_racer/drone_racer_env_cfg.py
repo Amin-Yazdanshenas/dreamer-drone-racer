@@ -638,3 +638,103 @@ class DroneRacerEnvCfg_NoCam_CTBR_PLAY(DroneRacerEnvCfg_NoCam_PLAY):
     """Ground-truth-only eval, CTBR action."""
 
     actions: DreamerActionsCfg = DreamerActionsCfg()
+
+
+# ============================================================
+# UPSTREAM-COMPATIBLE LEGACY CFGS for skrl-PPO tasks
+# ============================================================
+# We aggressively re-tuned rewards/curriculum for Dreamer (see DroneRacerEnvCfg_Dreamer
+# above). Those changes break the upstream skrl-PPO baseline, which was tuned with
+# different reward magnitudes (terminating=-500, gate_passed=400, push events on, spawn
+# at prev_gate +1m). Restore upstream values here so legacy PPO tasks behave as they did
+# before our Dreamer work.
+
+
+@configclass
+class LegacyEventCfg(EventCfg):
+    """Upstream EventCfg: push_robot interval events re-enabled for domain randomization."""
+
+    push_robot = EventTerm(
+        func=mdp.apply_external_force_torque,
+        mode="interval",
+        interval_range_s=(0.0, 0.2),
+        params={
+            "force_range": (-0.1, 0.1),
+            "torque_range": (-0.05, 0.05),
+        },
+    )
+
+
+@configclass
+class LegacyCommandsCfg:
+    """Upstream-style spawn: at prev_gate +1m forward, no lerp, no velocity bias."""
+
+    target = mdp.GateTargetingCommandCfg(
+        asset_name="robot",
+        track_name="track",
+        randomise_start=None,
+        record_fpv=False,
+        resampling_time_range=(1e9, 1e9),
+        debug_vis=False,
+        spawn_lerp_alpha=0.0,           # at prev gate
+        spawn_forward_offset=1.0,       # +1 m along prev_gate forward axis
+        spawn_forward_velocity=0.0,     # no initial velocity
+    )
+
+
+@configclass
+class LegacyTerminationsCfg:
+    """Upstream-style terminations: flyaway distance 20 m (was widened to 50 for Dreamer)."""
+
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    flyaway = DoneTerm(func=mdp.flyaway, params={"command_name": "target", "distance": 20.0})
+    collision = DoneTerm(
+        func=mdp.illegal_contact, params={"sensor_cfg": SceneEntityCfg("collision_sensor"), "threshold": 0.01}
+    )
+
+
+@configclass
+class LegacyRewardsCfg:
+    """Upstream reward weights — known to converge with skrl-PPO."""
+
+    terminating = RewTerm(func=mdp.is_terminated, weight=-500.0)
+    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.0001)
+    progress = RewTerm(func=mdp.progress, weight=20.0, params={"command_name": "target"})
+    gate_passed = RewTerm(func=mdp.gate_passed, weight=400.0, params={"command_name": "target"})
+    lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.1, params={"command_name": "target", "std": 0.5})
+
+
+@configclass
+class DroneRacerEnvCfg_NoCam_Legacy(DroneRacerEnvCfg_NoCam):
+    """Legacy upstream-tuned NoCam motor-omega training — restores PPO convergence behavior."""
+
+    commands: LegacyCommandsCfg = LegacyCommandsCfg()
+    events: LegacyEventCfg = LegacyEventCfg()
+    rewards: LegacyRewardsCfg = LegacyRewardsCfg()
+    terminations: LegacyTerminationsCfg = LegacyTerminationsCfg()
+
+
+@configclass
+class DroneRacerEnvCfg_NoCam_Legacy_PLAY(DroneRacerEnvCfg_NoCam_PLAY):
+    commands: LegacyCommandsCfg = LegacyCommandsCfg()
+    events: LegacyEventCfg = LegacyEventCfg()
+    rewards: LegacyRewardsCfg = LegacyRewardsCfg()
+    terminations: LegacyTerminationsCfg = LegacyTerminationsCfg()
+
+
+@configclass
+class DroneRacerEnvCfg_NoCam_CTBR_Legacy(DroneRacerEnvCfg_NoCam_CTBR):
+    """Legacy upstream-tuned + CTBR action — true CTBR vs PPO validation."""
+
+    commands: LegacyCommandsCfg = LegacyCommandsCfg()
+    events: LegacyEventCfg = LegacyEventCfg()
+    rewards: LegacyRewardsCfg = LegacyRewardsCfg()
+    terminations: LegacyTerminationsCfg = LegacyTerminationsCfg()
+
+
+@configclass
+class DroneRacerEnvCfg_NoCam_CTBR_Legacy_PLAY(DroneRacerEnvCfg_NoCam_CTBR_PLAY):
+    commands: LegacyCommandsCfg = LegacyCommandsCfg()
+    events: LegacyEventCfg = LegacyEventCfg()
+    rewards: LegacyRewardsCfg = LegacyRewardsCfg()
+    terminations: LegacyTerminationsCfg = LegacyTerminationsCfg()

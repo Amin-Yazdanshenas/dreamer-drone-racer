@@ -188,7 +188,7 @@ class GateTargetingCommand(CommandTerm):
                 env=self._env,
                 env_ids=env_ids,
                 gate_pose=spawn_pose,
-                forward_offset=0.0,   # offset baked into lerp_pos already
+                forward_offset=self.cfg.spawn_forward_offset,
                 initial_lin_vel_world=init_vel,
                 # Tightened from ±0.5 m / ±45° to keep the spawn inside the next gate's z-bbox
                 # (half-size 0.75 m) and the drone near level so it doesn't diverge before the
@@ -316,6 +316,12 @@ class GateTargetingCommandCfg(CommandTermCfg):
 
     gate_size: float = 1.5
     """Size of the gate bounding box in meters (half-size 0.75 m for default 1.5)."""
+
+    spawn_forward_offset: float = 0.0
+    """Extra forward offset along prev_gate's local +x axis (in meters), applied AFTER the lerp.
+    Default 0 because lerp position already places the drone between gates. Set to 1.0 for
+    upstream-style behavior (drone spawned 1 m in front of prev_gate, no lerp), e.g. for
+    legacy PPO tasks expecting the original drone-racing curriculum."""
 
     spawn_lerp_alpha: float = 0.3
     """Curriculum knob in [0, 1]. Drone spawns at LERP(prev_gate_pos, next_gate_pos, alpha).
