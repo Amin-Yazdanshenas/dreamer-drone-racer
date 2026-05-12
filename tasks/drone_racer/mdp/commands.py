@@ -175,11 +175,17 @@ class GateTargetingCommand(CommandTerm):
             # applies zero extra forward offset (already accounted for in the lerp).
             spawn_pose = torch.cat([lerp_pos, prev_quat], dim=1)
 
+            # Direction prev→next (world frame) for the initial velocity bias.
+            dir_vec = next_pos - prev_pos
+            dir_norm = torch.norm(dir_vec, dim=1, keepdim=True).clamp(min=1e-6)
+            init_vel = (dir_vec / dir_norm) * self.cfg.spawn_forward_velocity
+
             reset_after_prev_gate(
                 env=self._env,
                 env_ids=env_ids,
                 gate_pose=spawn_pose,
                 forward_offset=0.0,   # offset baked into lerp_pos already
+                initial_lin_vel_world=init_vel,
                 # Tightened from ±0.5 m / ±45° to keep the spawn inside the next gate's z-bbox
                 # (half-size 0.75 m) and the drone near level so it doesn't diverge before the
                 # rate controller can react. Re-widen once policy is competent (curriculum).
@@ -302,11 +308,19 @@ class GateTargetingCommandCfg(CommandTermCfg):
     gate_size: float = 1.5
     """Size of the gate bounding box in meters (half-size 0.75 m for default 1.5)."""
 
-    spawn_lerp_alpha: float = 0.5
+    spawn_lerp_alpha: float = 0.7
     """Curriculum knob in [0, 1]. Drone spawns at LERP(prev_gate_pos, next_gate_pos, alpha).
     0.0 = at prev gate, 0.5 = exact halfway, 1.0 = at next gate (very easy — just sit there).
-    Use 0.5 for early training so an untrained random policy has a chance of accidentally
-    crossing the next gate plane. Drop toward 0.0 once policy can reliably navigate.
+    Use 0.7 for early training so an untrained random policy has a chance of accidentally
+    crossing the next gate plane within a short random walk. Drop toward 0.0 once policy
+    can reliably navigate.
+    """
+
+    spawn_forward_velocity: float = 1.5
+    """Initial velocity (m/s) along the prev_gate → next_gate direction at spawn. Helps an
+    untrained Gaussian-mean=0 policy collect data where the drone is ALREADY moving toward
+    the gate — random rate noise then doesn't have to overcome zero translation from rest.
+    Set to 0.0 to disable.
     """
     """Size of the gate in meters. This is used to determine if the drone has passed through the gate."""
 

@@ -195,7 +195,7 @@ class RewardsCfg:
     ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=0.0)
     progress = RewTerm(func=mdp.progress, weight=20.0, params={"command_name": "target"})
     gate_passed = RewTerm(func=mdp.gate_passed, weight=30.0, params={"command_name": "target"})
-    lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.1, params={"command_name": "target", "std": 0.5})
+    lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.5, params={"command_name": "target", "std": 0.5})
 
 
 @configclass

@@ -26,6 +26,7 @@ def reset_after_prev_gate(
     velocity_range: dict[str, tuple[float, float]],
     asset_cfg_name: str = "robot",
     forward_offset: float = 1.0,
+    initial_lin_vel_world: torch.Tensor | None = None,
 ):
     """Reset the asset along the forward axis of the previous gate.
 
@@ -65,6 +66,11 @@ def reset_after_prev_gate(
     rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=asset.device)
 
     velocities = root_states[:, 7:13] + rand_samples
+    # Add per-env world-frame initial linear velocity bias (e.g. toward next gate) so the drone
+    # spawns already moving in the right direction — gives an untrained policy useful gradient
+    # data without relying on lucky random rate noise to break it out of rest.
+    if initial_lin_vel_world is not None:
+        velocities[:, 0:3] = velocities[:, 0:3] + initial_lin_vel_world
 
     # set into the physics simulation
     asset.write_root_pose_to_sim(torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
