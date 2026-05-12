@@ -185,7 +185,11 @@ class RewardsCfg:
 
     terminating = RewTerm(func=mdp.is_terminated, weight=-4.0)
     ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.001)
-    progress = RewTerm(func=mdp.progress, weight=1.0, params={"command_name": "target"})
+    # Progress weight bumped 1.0 → 20.0 so any motion toward the next gate produces a clearly
+    # visible reward signal during early exploration. At 1.0, ~1 m/s motion = 0.01/step which is
+    # below twohot bin width; the reward head couldn't distinguish progress from no-progress.
+    # Re-tighten once policy is competent.
+    progress = RewTerm(func=mdp.progress, weight=20.0, params={"command_name": "target"})
     gate_passed = RewTerm(func=mdp.gate_passed, weight=10.0, params={"command_name": "target"})
     lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.1, params={"command_name": "target", "std": 0.5})
 

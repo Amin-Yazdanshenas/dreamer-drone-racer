@@ -25,8 +25,15 @@ def reset_after_prev_gate(
     pose_range: dict[str, tuple[float, float]],
     velocity_range: dict[str, tuple[float, float]],
     asset_cfg_name: str = "robot",
+    forward_offset: float = 1.0,
 ):
-    """Reset the asset right after a random gate."""
+    """Reset the asset along the forward axis of the previous gate.
+
+    forward_offset (m): distance along the gate's local +x axis where the drone is spawned.
+    Used as a curriculum knob — small (1 m) for hard task starting near prev gate, larger
+    (e.g. 5 m) to bias spawn closer to next gate so untrained random policies have a chance
+    of accidentally passing the next gate.
+    """
 
     # extract the used quantities (to enable type-hinting)
     asset: RigidObject | Articulation = env.scene[asset_cfg_name]
@@ -41,7 +48,7 @@ def reset_after_prev_gate(
 
     gate_pos = gate_pose[env_ids, :3]
     gate_quat = gate_pose[env_ids, 3:7]
-    offset = torch.tensor([1.0, 0.0, 0.0], device=asset.device).expand(len(env_ids), 3)
+    offset = torch.tensor([forward_offset, 0.0, 0.0], device=asset.device).expand(len(env_ids), 3)
     offset_world = math_utils.quat_apply(gate_quat, offset)
     pos_after_prev_gate = gate_pos + offset_world
 

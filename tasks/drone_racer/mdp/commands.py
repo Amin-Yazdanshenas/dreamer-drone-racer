@@ -156,15 +156,30 @@ class GateTargetingCommand(CommandTerm):
             else:
                 self.next_gate_idx[env_ids] = 1
 
-            gate_indices = self.next_gate_idx - 1
-            gate_positions = self.track.data.object_com_pos_w[self.env_ids, gate_indices]
-            gate_orientations = self.track.data.object_quat_w[self.env_ids, gate_indices]
-            gate_w = torch.cat([gate_positions, gate_orientations], dim=1)
+            # prev_indices may be -1 when next_gate_idx==0 — wrap to last gate.
+            prev_indices = (self.next_gate_idx - 1) % self.num_gates
+            next_indices = self.next_gate_idx  # not yet incremented = next gate to pass
+            prev_pos = self.track.data.object_com_pos_w[self.env_ids, prev_indices]
+            prev_quat = self.track.data.object_quat_w[self.env_ids, prev_indices]
+            next_pos = self.track.data.object_com_pos_w[self.env_ids, next_indices]
+
+            # Curriculum spawn: position is the LERP between prev_gate and next_gate.
+            # spawn_lerp_alpha ∈ [0, 1]: 0 = at prev gate, 1 = at next gate, 0.5 = exact halfway.
+            # The previous "forward_offset" approach failed on sharp track turns where prev gate's
+            # forward axis doesn't point toward next gate. True lerp follows the segment regardless
+            # of gate orientation. Drone retains prev_gate's orientation (so it's facing along the
+            # outgoing forward direction of the gate it just passed).
+            alpha = self.cfg.spawn_lerp_alpha
+            lerp_pos = (1.0 - alpha) * prev_pos + alpha * next_pos
+            # Pass lerp_pos as the "gate" pose with prev_gate's quat so reset_after_prev_gate
+            # applies zero extra forward offset (already accounted for in the lerp).
+            spawn_pose = torch.cat([lerp_pos, prev_quat], dim=1)
 
             reset_after_prev_gate(
                 env=self._env,
                 env_ids=env_ids,
-                gate_pose=gate_w,
+                gate_pose=spawn_pose,
+                forward_offset=0.0,   # offset baked into lerp_pos already
                 # Tightened from ±0.5 m / ±45° to keep the spawn inside the next gate's z-bbox
                 # (half-size 0.75 m) and the drone near level so it doesn't diverge before the
                 # rate controller can react. Re-widen once policy is competent (curriculum).
@@ -285,6 +300,14 @@ class GateTargetingCommandCfg(CommandTermCfg):
     """If True, the first-person view (FPV) camera is recorded during the simulation."""
 
     gate_size: float = 1.5
+    """Size of the gate bounding box in meters (half-size 0.75 m for default 1.5)."""
+
+    spawn_lerp_alpha: float = 0.5
+    """Curriculum knob in [0, 1]. Drone spawns at LERP(prev_gate_pos, next_gate_pos, alpha).
+    0.0 = at prev gate, 0.5 = exact halfway, 1.0 = at next gate (very easy — just sit there).
+    Use 0.5 for early training so an untrained random policy has a chance of accidentally
+    crossing the next gate plane. Drop toward 0.0 once policy can reliably navigate.
+    """
     """Size of the gate in meters. This is used to determine if the drone has passed through the gate."""
 
     target_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/Command/goal_pose")
