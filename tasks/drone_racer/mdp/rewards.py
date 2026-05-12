@@ -137,9 +137,13 @@ def gate_passed(
     out_bbox = torch.any(abs_diff > half_size, dim=1)
 
     passed = crossing & in_bbox
-    missed = crossing & out_bbox & ~passed  # pass dominates miss
-
-    return 1.0 * passed.float() - 1.0 * missed.float()
+    # Asymmetric: only reward successful passes, do NOT penalize misses.
+    # Penalizing crossings-while-off-center makes the drone treat the gate area as dangerous
+    # (since missing is much more common than passing during early training), and the policy
+    # learns to AVOID gates entirely. Same philosophy as the asymmetric progress reward.
+    # Variable `out_bbox` no longer used here but kept above as a comment to document the logic.
+    _ = out_bbox  # silence linter
+    return passed.float()
 
 
 def lookat_next_gate(
