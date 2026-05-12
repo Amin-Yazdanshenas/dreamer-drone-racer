@@ -98,7 +98,12 @@ class GateTargetingCommand(CommandTerm):
 
     @property
     def gate_missed(self) -> torch.Tensor:
-        return self._gate_missed_accum
+        # Pass dominates miss. With decimation > 1, drone hovering near the gate plane can cross
+        # multiple times within one RL step — some crossings inside bbox (just_passed) and others
+        # at the bbox edge (just_missed). OR-accumulation makes both flags True simultaneously,
+        # and the reward `+passed - missed` cancels to 0. Mask missed-only when passed didn't
+        # also fire, so a successful gate pass never gets cancelled by a marginal edge wobble.
+        return self._gate_missed_accum & ~self._gate_passed_accum
 
     @property
     def gate_passed(self) -> torch.Tensor:
