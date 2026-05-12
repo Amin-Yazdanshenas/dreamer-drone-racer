@@ -54,7 +54,7 @@ simulation_app = app_launcher.app
 import sys
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).parent.resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[1]   # scripts/test_ctbr.py → repo root
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
