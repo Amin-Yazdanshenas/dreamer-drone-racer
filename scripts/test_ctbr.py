@@ -58,11 +58,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]   # scripts/test_ctbr.py → re
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import gymnasium as gym
 import torch
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
+from isaaclab.envs import ManagerBasedRLEnv
 
 import tasks  # noqa: F401
 
@@ -110,7 +110,7 @@ def commanded_rates_rad_s(rate_norms: tuple[float, float, float]) -> tuple[float
 # Test loop
 # ---------------------------------------------------------------------------
 
-def run_phase(env, phase: str, rate_norm: float, n_steps: int) -> None:
+def run_phase(env: ManagerBasedRLEnv, phase: str, rate_norm: float, n_steps: int) -> None:
     rates_n = resolve_rates(phase, rate_norm)
     cmd_rates = commanded_rates_rad_s(rates_n)
     spec = PHASES[phase]
@@ -121,15 +121,21 @@ def run_phase(env, phase: str, rate_norm: float, n_steps: int) -> None:
     print(f"  meaning: {spec['desc']}")
 
     env.reset()
-    action = make_action(env.unwrapped.num_envs, spec["c"], *rates_n).to(env.unwrapped.device)
+    action = make_action(env.num_envs, spec["c"], *rates_n).to(env.device)
+
+    # Sanity print first applied action (verifies action is reaching the action manager).
+    env.step(action)
+    applied = env.action_manager.action[0].cpu().tolist()
+    print(f"  first-step applied action (env 0): "
+          f"[{applied[0]:+.3f}, {applied[1]:+.3f}, {applied[2]:+.3f}, {applied[3]:+.3f}]")
 
     # Buffers for first env
     rates_log: list[tuple[float, float, float]] = []
     z_log: list[float] = []
 
-    for _ in range(n_steps):
+    for _ in range(n_steps - 1):  # -1 because we already did one step above
         env.step(action)
-        robot = env.unwrapped.scene["robot"]
+        robot = env.scene["robot"]
         ωb = robot.data.root_ang_vel_b[0].cpu().tolist()  # body-frame rates for env 0
         z = robot.data.root_pos_w[0, 2].item()
         rates_log.append(tuple(ωb))
@@ -183,7 +189,8 @@ def main():
     env_cfg.commands.target.spawn_forward_velocity = 0.0
     env_cfg.commands.target.randomise_start = False
 
-    env = gym.make(args_cli.task, cfg=env_cfg)
+    # Bypass gym wrappers — they can silently coerce/drop actions. Use the raw Isaac Lab env.
+    env = ManagerBasedRLEnv(cfg=env_cfg)
 
     phases = list(PHASES.keys()) if args_cli.phase == "all" else [args_cli.phase]
     for phase in phases:
