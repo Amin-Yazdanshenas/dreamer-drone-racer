@@ -113,7 +113,7 @@ Isaac Lab multiplies all reward terms by `dt = sim_dt × decimation = 0.01s/step
 | `networks.py` | `DroneEncoder` (CNN 64×64×C → embed_dim + state MLP), `MLP`, `MLPHead`, `BlockLinear`, `RMSNorm`, `ReturnEMA`, `NEDreamerTransformer`. |
 | `distributions.py` | `TwoHot` (symlog twohot, bins=255, range [-20,20]), `MultiOneHotDist`, `kl()` with per-category free bits, `symlog`/`symexp`. |
 | `replay_buffer.py` | `SequenceReplayBuffer` — episode-level storage with cached sample-weights, pads short episodes to `seq_len`. |
-| `env_wrapper.py` | `DreamerIsaacEnvWrapper` — bridges gym → DreamerV3 dict obs (image + state). State is 10-dim: ang_vel(3) + quat(4) + target_pos_b(3). NOT 13-dim — `lin_vel_b` was removed. |
+| `env_wrapper.py` | `DreamerIsaacEnvWrapper` — bridges gym → DreamerV3 dict obs (image + state). State is **13-dim**: ang_vel_b(3) + quat_w(4) + lin_vel_b(3) + target_pos_b(3). The 10-dim `DreamerObservationsCfg.policy` is dead code — Isaac Lab's ObservationManager computes it but env_wrapper bypasses and reads `robot.data` directly. |
 | `optim/laprop.py` | LaProp optimizer + AGC gradient clipping. |
 | `configs/dreamer_base.yaml` | h_dim=2048, stoch=32, discrete=16, hidden=256, batch_size=16, seq_len=64, lr=4e-5. |
 | `configs/ctbr_gains.yaml` | CTBR PD gains, `max_thrust=23.82 N`, `hover_thrust=5.96 N`. |
