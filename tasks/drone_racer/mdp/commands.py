@@ -62,7 +62,10 @@ class GateTargetingCommand(CommandTerm):
         # create buffers
         # -- commands: (x, y, z, qw, qx, qy, qz) in simulation world frame
         self.env_ids = torch.arange(self.num_envs, device=self.device)
-        self.prev_robot_pos_w = self.robot.data.root_pos_w
+        # IMPORTANT: clone here. Isaac Lab's root_pos_w is a VIEW of the live state buffer; without
+        # .clone() prev_robot_pos_w aliases the live tensor and gate-pass detection compares pos
+        # to itself every sub-step → passed_gate_plane always False and progress reward = 0.
+        self.prev_robot_pos_w = self.robot.data.root_pos_w.clone()
         self._gate_missed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._gate_passed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.next_gate_idx = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
@@ -230,7 +233,12 @@ class GateTargetingCommand(CommandTerm):
         self.next_gate_idx[self._gate_passed] += 1
         self.next_gate_idx = self.next_gate_idx % self.num_gates
 
-        self.prev_robot_pos_w = self.robot.data.root_pos_w
+        # CRITICAL: clone to take a real snapshot. Without .clone() prev_robot_pos_w becomes an
+        # alias to the live root_pos_w buffer (Isaac Lab returns a view), so on the next sub-step
+        # rel_old == rel_new → passed_gate_plane always False → no gate detection, zero progress
+        # reward, no learning signal. The single .clone() in _resample_command only fixed the
+        # first sub-step after reset, leaving 99% of sub-steps broken.
+        self.prev_robot_pos_w = self.robot.data.root_pos_w.clone()
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first time
