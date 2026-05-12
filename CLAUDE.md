@@ -1,89 +1,152 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in this repo. See [HANDOFF.md](HANDOFF.md) for live training state, recent bug fixes, and next experimental moves.
 
 ## Environment
 
 - **Isaac Sim 5.1** + **Isaac Lab 2.3.2** + **Python 3.11** (conda env: `isaacsim`)
-- Always activate the conda environment before running anything:
+- **GPU**: RTX 4090 (24 GB VRAM). Non-headless Isaac Sim works fine.
+- Activate before anything:
   ```bash
   conda activate isaacsim
   ```
-- All scripts must be run from the repo root (`isaac_drone_racer/`).
+- Run all scripts from repo root (`isaac_drone_racer/`).
+- Repo: `git@github.com:Amin-Yazdanshenas/dreamer-drone-racer.git`, branch `master`.
+- Binary assets (`*.usd`, `*.dae`, `*.glb`, `*.pt`, `*.mp4`, etc.) are Git LFS tracked.
 
-## Commands
+## Two training paths
 
-### Training
+### 1. DreamerV3 family (ACTIVE — primary)
+
+Model-based RL. Two agent variants share the same env and training loop:
+- **R2-Dreamer**: Barlow Twins repr loss. `dreamer/agent.py` → `DreamerV3Agent`.
+- **NE-Dreamer**: causal transformer repr loss (CORL-team NE-Dreamer port). `dreamer/ne_agent.py` → `NEDreamerV3Agent`.
+
+Train:
 ```bash
-# Camera-based asymmetric actor-critic (requires --enable_cameras)
+python3 scripts/rl/train_dreamer.py \
+    --task Isaac-Drone-Racer-Dreamer-RGB-v0 \
+    --obs_mode rgb --agent r2dreamer \
+    --num_envs 256 --headless --enable_cameras \
+    --max_steps 5000000
+
+# Optional flags:
+#   --checkpoint <path>       resume from .pt checkpoint
+#   --record_fpv              save mp4 of every gate-passing episode (env 0 only)
+#   --render_interval N       physics steps between viewport renders (auto: 16 GUI, 100 headless)
+```
+
+Evaluate:
+```bash
+python3 scripts/rl/evaluate_dreamer.py \
+    --task Isaac-Drone-Racer-Dreamer-Play-v0 \
+    --obs_mode rgb --agent r2dreamer \
+    --checkpoint logs/dreamer/r2dreamer/rgb/<RUN>/checkpoints/agent_latest.pt \
+    --num_episodes 10 --enable_cameras
+
+# --stochastic           sample actions instead of tanh(mean)
+# --video                record mp4 of eval
+```
+
+### 2. skrl PPO (LEGACY — kept but unused)
+
+Earlier camera-PPO + ground-truth-PPO attempt. Kept for reference but **not the active learning path**.
+
+```bash
 python3 scripts/rl/train.py --task Isaac-Drone-Racer-v0 --headless --enable_cameras --num_envs 64
-
-# Ground-truth only (faster, no camera)
-python3 scripts/rl/train.py --task Isaac-Drone-Racer-NoCam-v0 --headless --num_envs 4096
-```
-
-### Play / Inference
-```bash
 python3 scripts/rl/play.py --task Isaac-Drone-Racer-Play-v0 --enable_cameras --num_envs 1
-python3 scripts/rl/play.py --task Isaac-Drone-Racer-NoCam-Play-v0 --num_envs 1
-
-# Play with CSV logging (single env only)
-python3 scripts/rl/play.py --task Isaac-Drone-Racer-NoCam-Play-v0 --num_envs 1 --log 5
 ```
 
-### Tests (no Isaac Sim required)
-```bash
-pytest tests/
-```
+Uses skrl `Runner` with `CNNPolicy` + `MLPCritic` (asymmetric AC). Don't add new features here — pour them into the Dreamer path.
 
-### Linting
-```bash
-pre-commit run --all-files
-```
-Line length is **120**. Formatter is `black`, import sorter is `isort --profile black`.
+## Task registry (`tasks/drone_racer/__init__.py`)
 
-## Architecture
+| Gym ID | Env cfg | Purpose |
+|---|---|---|
+| `Isaac-Drone-Racer-Dreamer-RGB-v0` | `DroneRacerEnvCfg_Dreamer` | Dreamer, RGB obs (active) |
+| `Isaac-Drone-Racer-Dreamer-Mask-v0` | `DroneRacerEnvCfg_Dreamer` (mask) | Dreamer, segmentation mask |
+| `Isaac-Drone-Racer-Dreamer-RGBMask-v0` | `DroneRacerEnvCfg_Dreamer` (rgb+mask) | Dreamer, 4-channel |
+| `Isaac-Drone-Racer-Dreamer-Play-v0` | `DroneRacerEnvCfg_Dreamer_PLAY` | Eval |
+| `Isaac-Drone-Racer-v0` / `-Play-v0` | `DroneRacerEnvCfg` | LEGACY skrl PPO (camera+IMU actor, GT critic) |
+| `Isaac-Drone-Racer-NoCam-v0` / `-NoCam-Play-v0` | `DroneRacerEnvCfg_NoCam` | LEGACY skrl PPO (GT-only) |
 
-### Task registration flow
-`tasks/__init__.py` → imports `tasks/drone_racer/__init__.py` → registers 4 Gym IDs:
-- `Isaac-Drone-Racer-v0` / `-Play-v0` — camera + IMU actor, ground-truth critic
-- `Isaac-Drone-Racer-NoCam-v0` / `-NoCam-Play-v0` — ground-truth state only
+## Architecture (DreamerV3 path)
 
-Each Gym ID is bound to an env cfg class and a skrl YAML config in `tasks/drone_racer/agents/`.
+### Env config (`tasks/drone_racer/drone_racer_env_cfg.py`)
 
-### Env config (`drone_racer_env_cfg.py`)
-Isaac Lab `@configclass` hierarchy. Key classes:
-- `DroneRacerSceneCfg` — scene: ground, track, robot, sensors (IMU, collision, tiled camera)
-- `ObservationsCfg` — **asymmetric AC**: `PolicyCfg` (camera grayscale 4096 + IMU 7 = 4103-dim) feeds `OBSERVATIONS`; `CriticCfg` (pos 3 + quat 4 + lin_vel 3 + ang_vel 3 + target_pos 3 + actions 4 = 20-dim) feeds `STATES`
-- `NoCamObservationsCfg` — single `PolicyCfg` with 20-dim ground-truth; no critic group
-- `DroneRacerEnvCfg` — training (4096 envs, both obs groups active, camera enabled)
-- `DroneRacerEnvCfg_PLAY` — inference (critic obs kept active so skrl value network can init; push events disabled)
-- `DroneRacerEnvCfg_NoCam` / `_NoCam_PLAY` — camera disabled in scene config
+Isaac Lab `@configclass`:
+- `DroneRacerSceneCfg` — ground + track (7 gates) + drone + IMU + collision sensor + TiledCamera (64×64 RGB).
+- `DroneRacerEnvCfg_Dreamer` — uses `DreamerActionsCfg` (CTBR), random-start curriculum, 256 envs, episode_length_s=20.
+- `RewardsCfg` — see **Reward shaping** below.
 
 ### MDP modules (`tasks/drone_racer/mdp/`)
-All symbols are re-exported flat via `mdp/__init__.py` (which also re-exports `isaaclab.envs.mdp.*`).
-- `actions.py` — `ControlAction`: maps 4 normalised actions → motor ω refs → `Allocation.compute()` → thrust + 3-axis moment applied as permanent wrench on body frame
-- `commands.py` — `GateTargetingCommand`: tracks next gate index per env, detects gate passing via plane-crossing + bounding-box check, resets drone near the previous gate on episode reset, optionally records FPV video
-- `observations.py` — `flat_image()` converts RGB→grayscale, flattens to (N, H×W); IMU and pose helpers; `target_pos_b()` returns target in body frame
-- `rewards.py` / `terminations.py` / `events.py` — standard Isaac Lab term functions
+Flat re-exports via `mdp/__init__.py`. Also re-exports `isaaclab.envs.mdp.*`.
+
+| File | Key class/fn | Notes |
+|---|---|---|
+| `commands.py` | `GateTargetingCommand` | Tracks `next_gate_idx` per env. Inline plane-crossing + bbox detection (using `prev_robot_pos_w.clone()` snapshot — DO NOT alias). Lerp-spawn curriculum (`spawn_lerp_alpha`, `spawn_forward_velocity`). |
+| `rewards.py` | `progress`, `gate_passed` | `progress` is asymmetric (`.clamp(min=0)`). `gate_passed` computes plane-crossing **inline** because Isaac Lab calls `reward_manager.compute()` BEFORE `command_manager.compute()`. |
+| `actions.py` | `CTBRAction`, `ControlAction` | CTBR: `c=0 → hover_thrust` (asymmetric linear), PD controller with `derr/dt` damping. ControlAction (motor-omega allocation) is legacy. |
+| `events.py` | `reset_after_prev_gate` | Writes drone spawn pose; takes `forward_offset` and `initial_lin_vel_world` params. |
+| `observations.py` | various | Note: Dreamer reads obs directly via `env_wrapper.py`, not through ObservationManager. |
+| `terminations.py` | standard | `flyaway` (50 m), `collision`, `time_out`. |
+
+### Reward shaping (current weights)
+
+| Term | Weight | Notes |
+|---|---|---|
+| `terminating` | -2 | Crash penalty (softened from -4) |
+| `ang_vel_l2` | 0 | Disabled |
+| `progress` | 10 | Asymmetric, low weight to avoid drift exploitation |
+| `gate_passed` | 10000 | Isaac Lab dt-scales → +100 per pass. Big enough to dominate progress. |
+| `lookat_next` | 0.5 | Heading prior |
+
+Isaac Lab multiplies all reward terms by `dt = sim_dt × decimation = 0.01s/step`. Sparse rewards need weight ≈ `desired_spike / dt`.
+
+### Dreamer agent (`dreamer/`)
+
+| File | Role |
+|---|---|
+| `agent.py` | `DreamerConfig` (dataclass), `DreamerV3Agent` (encoder + RSSM + reward/cont heads + actor + critic + LaProp + ReturnEMA). Inline `Actor` + `Critic` classes. Has `_repr_loss` hook for subclassing. |
+| `ne_agent.py` | `NEDreamerV3Agent` — subclass adding `NEDreamerTransformer`. Overrides `_repr_loss`. |
+| `rssm.py` | BlockLinear GRU `Deter` cell + `MultiOneHotDist` categorical latent (`stoch=32`, `discrete=16`). Posterior/prior with balanced KL + free bits per category. |
+| `networks.py` | `DroneEncoder` (CNN 64×64×C → embed_dim + state MLP), `MLP`, `MLPHead`, `BlockLinear`, `RMSNorm`, `ReturnEMA`, `NEDreamerTransformer`. |
+| `distributions.py` | `TwoHot` (symlog twohot, bins=255, range [-20,20]), `MultiOneHotDist`, `kl()` with per-category free bits, `symlog`/`symexp`. |
+| `replay_buffer.py` | `SequenceReplayBuffer` — episode-level storage with cached sample-weights, pads short episodes to `seq_len`. |
+| `env_wrapper.py` | `DreamerIsaacEnvWrapper` — bridges gym → DreamerV3 dict obs (image + state). State is 10-dim: ang_vel(3) + quat(4) + target_pos_b(3). NOT 13-dim — `lin_vel_b` was removed. |
+| `optim/laprop.py` | LaProp optimizer + AGC gradient clipping. |
+| `configs/dreamer_base.yaml` | h_dim=2048, stoch=32, discrete=16, hidden=256, batch_size=16, seq_len=64, lr=4e-5. |
+| `configs/ctbr_gains.yaml` | CTBR PD gains, `max_thrust=23.82 N`, `hover_thrust=5.96 N`. |
+| `configs/ne_dreamer_*.yaml` | NE-Dreamer overrides. |
+| `actor_critic.py` | **DEAD CODE** — inline `Actor`/`Critic` in `agent.py` are used. |
 
 ### Dynamics (`dynamics/`)
-Pure-PyTorch, no Isaac Sim dependency — usable in unit tests.
-- `Allocation`: batched allocation matrix `(num_envs, 4, 4)` mapping `ω²` → `[Fz, Mx, My, Mz]`
-- `Motor`: first-order lag model per motor with rate clamping; bypass with `use=False`
+Pure-PyTorch, no Isaac Sim deps. `Allocation` (omega² → wrench matrix) + `Motor` (first-order lag). Used by the LEGACY `ControlAction` only. Dreamer uses `CTBRAction`. `tests/test_dynamics.py` has a pre-existing import error (unrelated to current work).
 
-### CNN policy (`tasks/drone_racer/agents/`)
-Camera tasks use `CamRunner(Runner)` which overrides `_generate_models` to inject:
-- `CNNPolicy` (`GaussianMixin`): 4-layer conv (1→16→32→64→64) over 64×64 image → 1024 → Linear(64), cat with IMU(7) → MLP(256→256) → actions
-- `MLPCritic` (`DeterministicMixin`): Linear(20→256→256→256→1) on STATES
-No-cam tasks use standard skrl Runner with `skrl_cfg_nocam.yaml` (`separate: False`, shared MLP).
+### Logging (Dreamer)
+- TB logs → `logs/dreamer/{r2dreamer|ne_dreamer}/{rgb|mask|rgb_mask}/<run-tag>/tensorboard/`
+- Checkpoints → `<run-tag>/checkpoints/agent_latest.pt`
+- Extra TB tags beyond Dreamer defaults: `env/gate_pass_rate`, `replay/reward_max|min|abs_mean`, `wm/kl_unclamped`, `replay/buffer_size`, `actor/floor_pen`. See HANDOFF.md §6 for meaning.
 
-### Logging
-- Training metrics are stored in `logs/skrl/drone_racer/` (camera) or `logs/skrl/drone_racer_nocam/` (no-cam)
-- `utils/logger.py`: `log(env, keys, tensor)` stores per-step metrics in `env.extras["metrics"]`; `CSVLogger` writes episodes to CSV and calls `utils/plotter.py` on save
+## Key constraints
 
-### Key constraints
-- `--enable_cameras` is **required** for any task that has a `TiledCameraCfg` in the scene. Forgetting it raises `RuntimeError` at sim reset.
-- Camera resolution is 64×64 pinhole. Changing it requires updating `IMAGE_H`/`IMAGE_W` constants in `agents/models.py`.
-- `env.state_space` (STATES) is only non-None when the `critic` obs group exists in the env cfg. The play configs keep it active because skrl always instantiates the value network even at inference.
-- `env_spacing=0.0` — all environments share the same world-space track; gate positions are absolute, not per-env-origin-relative.
+- `--enable_cameras` is **required** for any task with a `TiledCameraCfg`. Forgetting → `RuntimeError` at sim reset.
+- Camera res 64×64 pinhole. Changing requires updating image shapes in `dreamer/agent.py` (DroneEncoder ctor).
+- `env_spacing=0.0` — all envs share the same world track. Gate positions absolute.
+- Dreamer warmup: at `_step < cfg.warmup_steps`, `act()` returns random actions BUT still steps the RSSM (avoid zero-carry pollution).
+- Isaac Lab order: `reward_manager.compute()` runs BEFORE `command_manager.compute()`. Any reward that depends on command state must read upstream state directly (see `gate_passed` in `rewards.py`).
+- Don't rely on `cmd.gate_passed`/`cmd.gate_missed` properties for reward — they fill AFTER reward computation. Compute inline.
+
+## Workflow conventions
+
+- **Auto-commit**: every code change gets committed + pushed with conventional commit format (`fix:`, `feat:`, `refactor:`, `chore:`). User explicitly requested this.
+- **Pre-commit hooks**: `pre-commit run --all-files`. Line length **120**. Formatter `black`. Imports `isort --profile black`.
+- **Tests**: `pytest tests/ --ignore=tests/test_dynamics.py -q`. Should pass 13/13. (`test_dynamics.py` has stale import.)
+- **Caveman mode**: user prefers terse responses. Drop articles/filler; full technical accuracy. Code/commits/security: write normal English.
+
+## Pointers
+
+- **Live training state, bug history, next moves**: [HANDOFF.md](HANDOFF.md)
+- **In-flight planning notes**: `~/.claude/plans/floofy-popping-raccoon.md`
+- **DreamerV3 paper**: Hafner et al. 2023
+- **NE-Dreamer**: https://github.com/corl-team/nedreamer
