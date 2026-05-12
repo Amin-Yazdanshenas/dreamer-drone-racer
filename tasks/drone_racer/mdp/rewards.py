@@ -103,8 +103,16 @@ def gate_passed(
     command_name: str | None = None,
 ) -> torch.Tensor:
     """Reward for passing a gate."""
-    missed = (-1.0) * env.command_manager.get_term(command_name).gate_missed
-    passed = (1.0) * env.command_manager.get_term(command_name).gate_passed
+    cmd = env.command_manager.get_term(command_name)
+    gp_bool = cmd.gate_passed
+    gm_bool = cmd.gate_missed
+    # DEBUG: confirm what the reward function actually sees
+    if gp_bool.any() or gm_bool.any():
+        gp_idx = gp_bool.nonzero(as_tuple=True)[0].tolist()
+        gm_idx = gm_bool.nonzero(as_tuple=True)[0].tolist()
+        print(f"[REWARD-FN] gate_passed_envs={gp_idx}  gate_missed_envs={gm_idx}", flush=True)
+    missed = (-1.0) * gm_bool
+    passed = (1.0) * gp_bool
     return missed + passed
 
 
