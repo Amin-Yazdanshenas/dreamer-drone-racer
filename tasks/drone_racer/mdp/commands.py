@@ -317,12 +317,13 @@ class GateTargetingCommandCfg(CommandTermCfg):
     gate_size: float = 1.5
     """Size of the gate bounding box in meters (half-size 0.75 m for default 1.5)."""
 
-    spawn_lerp_alpha: float = 0.7
+    spawn_lerp_alpha: float = 0.3
     """Curriculum knob in [0, 1]. Drone spawns at LERP(prev_gate_pos, next_gate_pos, alpha).
     0.0 = at prev gate, 0.5 = exact halfway, 1.0 = at next gate (very easy — just sit there).
-    Use 0.7 for early training so an untrained random policy has a chance of accidentally
-    crossing the next gate plane within a short random walk. Drop toward 0.0 once policy
-    can reliably navigate.
+    Use 0.7 to bootstrap an untrained policy through early exploration. Once gate-pass rate
+    exceeds ~5%, drop toward 0.3 — drone must navigate further, forcing it to learn the actual
+    flight skill instead of overfitting to "drift and pass the nearby gate". Drop to 0.0 once
+    policy can reliably chain 2+ gates.
     """
 
     spawn_forward_velocity: float = 1.5
