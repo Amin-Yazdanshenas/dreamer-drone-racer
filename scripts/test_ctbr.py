@@ -141,32 +141,47 @@ def run_phase(env: ManagerBasedRLEnv, phase: str, rate_norm: float, n_steps: int
         rates_log.append(tuple(ωb))
         z_log.append(z)
 
-    # Summary
-    last_25 = rates_log[-max(1, n_steps // 4):]  # last quarter = settled region
-    mean_ωx = sum(r[0] for r in last_25) / len(last_25)
-    mean_ωy = sum(r[1] for r in last_25) / len(last_25)
-    mean_ωz = sum(r[2] for r in last_25) / len(last_25)
+    # For ROLL / PITCH phases the drone tilts → loses lift → falls within ~0.5 s. The "settled"
+    # rate region (last quarter) measures the drone on the ground, NOT the controller's true
+    # in-air response. Instead, find the time-to-target window (first 0.5 s) and report PEAK
+    # signed rate per axis on the AXIS BEING COMMANDED. This works because gravity-induced
+    # cross-coupling is small before tilt > 30°.
+    in_air_window = min(50, len(rates_log))   # first 0.5 s @ 100 Hz RL rate
+    win = rates_log[:in_air_window]
     z_start = z_log[0]
     z_end = z_log[-1]
 
+    # Peak signed rate per axis (signed so we keep direction)
+    def signed_peak(seq, axis):
+        return max(seq, key=lambda r: abs(r[axis]))[axis]
+
+    peak_ωx = signed_peak(win, 0)
+    peak_ωy = signed_peak(win, 1)
+    peak_ωz = signed_peak(win, 2)
+
+    # Mean over last 10 in-air steps for tracking comparison on stable axes (yaw, hover)
+    settled = win[-min(10, len(win)):]
+    mean_ωx = sum(r[0] for r in settled) / len(settled)
+    mean_ωy = sum(r[1] for r in settled) / len(settled)
+    mean_ωz = sum(r[2] for r in settled) / len(settled)
+
     print()
-    print(f"  settled body rates (rad/s) = ({mean_ωx:+.3f}, {mean_ωy:+.3f}, {mean_ωz:+.3f})")
-    print(f"  tracking error      (rad/s) = ({mean_ωx - cmd_rates[0]:+.3f}, "
-          f"{mean_ωy - cmd_rates[1]:+.3f}, {mean_ωz - cmd_rates[2]:+.3f})")
+    print(f"  peak in-air rates  (rad/s) = ({peak_ωx:+.3f}, {peak_ωy:+.3f}, {peak_ωz:+.3f})  "
+          f"[window: first {in_air_window} steps]")
+    print(f"  mean settled       (rad/s) = ({mean_ωx:+.3f}, {mean_ωy:+.3f}, {mean_ωz:+.3f})")
     print(f"  altitude z: start={z_start:+.3f}m  end={z_end:+.3f}m  Δ={z_end - z_start:+.3f}m")
 
-    # Pass/fail heuristics
-    rate_tol = 0.5  # rad/s settled tracking error tolerance
-    err_ωx = abs(mean_ωx - cmd_rates[0])
-    err_ωy = abs(mean_ωy - cmd_rates[1])
-    err_ωz = abs(mean_ωz - cmd_rates[2])
-    rates_ok = err_ωx < rate_tol and err_ωy < rate_tol and err_ωz < rate_tol
+    # Pass/fail heuristics — use PEAK rate vs commanded
+    rate_tol = 1.0  # rad/s peak tracking tolerance (transient response)
+    err_ωx = peak_ωx - cmd_rates[0]
+    err_ωy = peak_ωy - cmd_rates[1]
+    err_ωz = peak_ωz - cmd_rates[2]
+    rates_ok = abs(err_ωx) < rate_tol and abs(err_ωy) < rate_tol and abs(err_ωz) < rate_tol
 
     if phase == "hover":
-        # Tighter altitude criterion when hovering
-        alt_ok = abs(z_end - z_start) < 0.3  # ≤30 cm drift over 2 s
+        alt_ok = abs(z_end - z_start) < 0.3  # ≤30 cm drift
         print(f"  HOVER altitude drift {'OK' if alt_ok else 'FAIL'} (|Δz| < 0.3 m)")
-        print(f"  RATES {'OK' if rates_ok else 'FAIL'}")
+        print(f"  RATES {'OK' if abs(mean_ωx) < 0.2 and abs(mean_ωy) < 0.2 and abs(mean_ωz) < 0.2 else 'FAIL'}")
     elif phase == "climb":
         climbed = (z_end - z_start) > 0.5
         print(f"  CLIMB {'OK' if climbed else 'FAIL'} (Δz > +0.5 m)")
@@ -174,7 +189,8 @@ def run_phase(env: ManagerBasedRLEnv, phase: str, rate_norm: float, n_steps: int
         dropped = (z_end - z_start) < -0.5
         print(f"  DESCEND {'OK' if dropped else 'FAIL'} (Δz < -0.5 m)")
     else:
-        print(f"  RATE-TRACKING {'OK' if rates_ok else 'FAIL'} (|err| < {rate_tol} rad/s)")
+        print(f"  RATE PEAK-TRACKING {'OK' if rates_ok else 'FAIL'} "
+              f"(|err| < {rate_tol} rad/s on {phase} axis; err=({err_ωx:+.2f},{err_ωy:+.2f},{err_ωz:+.2f}))")
 
 
 def main():
