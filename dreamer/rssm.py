@@ -248,28 +248,28 @@ class RSSM(nn.Module):
 
     def imagine(self, actor_fn, init_stoch: torch.Tensor, init_deter: torch.Tensor,
                 horizon: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Imagination rollout using actor_fn(latent) → (action, log_prob).
+        """Imagination rollout using actor_fn(latent) → (action, entropy).
 
-        Returns: (stoch_seq, deter_seq, action_seq, log_prob_seq)
+        Returns: (stoch_seq, deter_seq, action_seq, entropy_seq)
         Each: (horizon, B, *) — note first dim is time.
         """
         stoch, deter = init_stoch, init_deter
-        stochs, deters, acts, lps = [], [], [], []
+        stochs, deters, acts, ents = [], [], [], []
 
         for _ in range(horizon):
             latent = torch.cat([deter, stoch], dim=-1)
-            action, log_prob = actor_fn(latent)
+            action, entropy = actor_fn(latent)
             prior_logits, prior_stoch, new_deter = self.img_step(stoch, deter, action)
             stoch = prior_stoch
             deter = new_deter
             stochs.append(stoch)
             deters.append(deter)
             acts.append(action)
-            lps.append(log_prob)
+            ents.append(entropy)
 
         return (
             torch.stack(stochs),   # (H, B, z_dim)
             torch.stack(deters),   # (H, B, h_dim)
             torch.stack(acts),     # (H, B, A)
-            torch.stack(lps),      # (H, B)
+            torch.stack(ents),     # (H, B)
         )

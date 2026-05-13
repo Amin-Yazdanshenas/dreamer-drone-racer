@@ -161,8 +161,18 @@ class Actor(nn.Module):
         self.action_dim = action_dim
         self.net = MLP(latent_dim, action_dim * 2, units=units, layers=layers)
 
+    # 0.5 * (1 + log(2π))  — per-dim Gaussian entropy constant
+    _GAUSSIAN_ENT_CONST = 1.4189385332046727
+
     def forward(self, latent: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns (action, log_prob)."""
+        """Returns (action, entropy).
+
+        entropy: analytic differential entropy of the *pre-tanh* Gaussian, summed
+        across action dim, shape (B,). SAC-style regularizer — closed form, no
+        MC variance, bounded since log_std is clamped. Replaces the old one-sample
+        log-prob estimate `H ≈ -log_prob(sampled_action)` which had high variance
+        AND was unbounded below when tanh saturated (log(1 - y^2) → -inf).
+        """
         out = self.net(latent)
         mean, log_std = out.chunk(2, dim=-1)
         log_std = log_std.clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
@@ -172,23 +182,14 @@ class Actor(nn.Module):
         pre_tanh = mean + std * eps
         action = torch.tanh(pre_tanh)
 
-        log_prob = _gaussian_log_prob(pre_tanh, mean, std) - _tanh_log_det(action)
-        return action, log_prob
+        # H[N(mean, std)] = sum_i (log std_i + 0.5 * (1 + log 2π))
+        entropy = log_std.sum(-1) + self._GAUSSIAN_ENT_CONST * mean.shape[-1]
+        return action, entropy
 
     def act_deterministic(self, latent: torch.Tensor) -> torch.Tensor:
         out = self.net(latent)
         mean, _ = out.chunk(2, dim=-1)
         return torch.tanh(mean)
-
-
-def _gaussian_log_prob(x: torch.Tensor, mean: torch.Tensor,
-                       std: torch.Tensor) -> torch.Tensor:
-    log2pi = 0.9189385332046727  # 0.5 * log(2π)
-    return (-0.5 * ((x - mean) / std) ** 2 - std.log() - log2pi).sum(-1)
-
-
-def _tanh_log_det(action: torch.Tensor) -> torch.Tensor:
-    return torch.log(1.0 - action ** 2 + 1e-6).sum(-1)
 
 
 class Critic(nn.Module):
@@ -668,7 +669,7 @@ class DreamerV3Agent:
         gamma = self.cfg.gamma
 
         # Imagination rollout
-        stoch_seq, deter_seq, act_seq, lp_seq = self.rssm.imagine(
+        stoch_seq, deter_seq, act_seq, ent_seq = self.rssm.imagine(
             self.actor, init_stoch, init_deter, H
         )  # each: (H, B, *)
 
@@ -708,8 +709,10 @@ class DreamerV3Agent:
         # algebraically collapses to a constant `entropy_min` when entropy < min, killing the gradient
         # exactly when the policy needed it most. Now: baseline entropy bonus + extra penalty for
         # dropping below the floor, both differentiable.
-        log_probs = lp_seq.reshape(HH * B2)
-        entropy = -log_probs.mean()
+        #
+        # entropy is the ANALYTIC pre-tanh Gaussian entropy returned by Actor.forward —
+        # closed form, bounded since log_std is clamped, no MC noise.
+        entropy = ent_seq.reshape(HH * B2).mean()
         floor_pen = F.relu(torch.tensor(self.cfg.entropy_min, device=entropy.device) - entropy)
         actor_loss = -targets_norm.reshape(HH * B2).mean()
         actor_loss = actor_loss - self.cfg.entropy_scale * entropy + self.cfg.entropy_floor_weight * floor_pen
