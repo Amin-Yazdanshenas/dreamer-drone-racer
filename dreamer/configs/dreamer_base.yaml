@@ -1,52 +1,75 @@
-# DreamerV3 base configuration — shared defaults for all obs modes.
-# Scaled for 24 GB VRAM (RTX 4090).  Override per obs mode in dreamer_rgb/mask/rgb_mask.yaml.
+# DreamerV3 / R2-Dreamer base configuration.
+#
+# Keys MUST match `DreamerConfig` dataclass field names — `from_yaml`/`_load_config`
+# silently drop any unknown key via `hasattr(cfg, k)` check. Previous version used
+# paper-style names (z_cats, mlp_dim, free_bits, beta_pred, lr_world/lr_actor/lr_critic,
+# target_critic_ema, horizon for imag-rollout) which were ALL dropped → training ran
+# with dataclass defaults (discrete=16, hidden=256, loss_scale_rew=1.0, lr=4e-5,
+# gamma=0.933 via `horizon: 15` accidentally overriding the discount-horizon field).
+# This rewrite fixes the mapping. NE-Dreamer yaml already used correct names.
 
 obs_mode: rgb
-image_channels: 3       # overridden per yaml
+image_channels: 3       # overridden per obs-mode yaml
 state_dim: 13           # ang_vel(3) + quat(4) + lin_vel(3) + target_pos_b(3)
 action_dim: 4
 
-# RSSM — full paper spec (paper: h_dim=2048, mlp_dim=768, cnn_depth=48)
-h_dim: 2048             # recurrent state dim
-z_cats: 32              # number of categorical variables
-z_classes: 32           # classes per variable  → latent = h_dim + z_cats*z_classes = 3072
-mlp_dim: 768            # hidden dim for all MLPs
-cnn_depth: 48           # base CNN channel count
+# ----- RSSM (paper spec: h_dim=2048, hidden=768, stoch=32, discrete=32) -----
+h_dim: 2048             # deter recurrent state dim
+stoch: 32               # number of categorical variables
+discrete: 32            # classes per categorical (paper=32; was incorrectly 16)
+hidden: 768             # MLP hidden size in RSSM + heads (paper=768; was incorrectly 256)
+blocks: 8
+obs_layers: 1
+img_layers: 2
+dyn_layers: 1
 
-# World model loss coefficients
-# free_bits=1.0: KL floor per category (nats). Both NM512 and danijar use 1.0.
-# Prevents posterior collapse by forcing z to encode at least 1 nat from observations.
-beta_pred: 3.0
-beta_dyn: 0.5   # 1.0 caused posterior collapse via KL spike at 358K; 0.5 stable
-beta_rep: 0.1
-free_bits: 1.0  # KL floor — main defence against posterior collapse
+# ----- Encoder -----
+cnn_depth: 48           # base CNN channel count (paper=48)
+mlp_units: 256          # encoder state-MLP units
 
-# Actor-critic
-horizon: 15             # imagination rollout length
-# gamma derived from horizon: gamma = 1 - 1/horizon (≈ 0.997 for horizon=333)
+# ----- World model loss scales -----
+# Paper β_pred=3.0 → reward + continue heads weighted 3x to balance against KL/repr.
+loss_scale_rew: 3.0
+loss_scale_con: 3.0
+beta_dyn: 0.5           # dyn KL weight (1.0 caused posterior collapse @358K; 0.5 stable)
+beta_rep: 0.1           # rep KL weight
+kl_free: 1.0            # per-category free bits — main defence against posterior collapse
+loss_scale_barlow: 0.05
+
+# ----- Actor-critic -----
+imag_horizon: 15        # imagination rollout length
+horizon: 333            # discount horizon → gamma = 1 - 1/333 ≈ 0.997
 lam: 0.95
-entropy_scale: 3.0e-3   # 10x paper value: training showed policy collapse at 3e-4; 3e-3 keeps H[π] positive
-entropy_min: 1.0        # floor: penalty kicks in if entropy drops below this (nats); prevents policy collapse
-target_critic_ema: 0.98
+entropy_scale: 3.0e-3   # 10x paper: bare 3e-4 collapsed policy in earlier runs
+entropy_min: 1.0        # entropy floor (nats)
+entropy_floor_weight: 1.0e-2
+slow_target_fraction: 0.02   # target critic EMA alpha (= 1 - 0.98)
 
-# Training
-seq_len: 64             # sequence length per replay sample — paper value
-batch_size: 16          # paper + both reference implementations use 16
-lr_world: 1.0e-4
-lr_actor: 3.0e-5
-lr_critic: 3.0e-5
-grad_clip: 100.0
-warmup_steps: 2000      # random action warmup before learning starts
-update_every: 1         # env steps between gradient update cycles
-n_grad_steps: 4         # gradient updates per cycle
+# ----- Optimizer (LaProp + AGC; paper's grad_clip not wired — AGC used instead) -----
+# NM512 r2dreamer uses single lr=4e-5; paper splits wm=1e-4, ac=3e-5. Single-lr field —
+# pick wm-side 1e-4 (largest module). Bump down if actor diverges.
+lr: 1.0e-4
+agc: 0.3
+pmin: 1.0e-3
+eps: 1.0e-20
+beta1: 0.9
+beta2: 0.999
+warmup: 1000            # LR warmup grad steps
 
-# Replay buffer
+# ----- Training -----
+seq_len: 64
+batch_size: 16
+warmup_steps: 2000
+update_every: 1
+n_grad_steps: 4
+
+# ----- Replay -----
 replay_capacity: 2000000
 
-# Speed
-compile: true         # torch.compile networks (reduce-overhead mode)
-amp_dtype: bfloat16   # bfloat16 recommended for RTX 4090; fall back to float16 if issues
+# ----- Speed -----
+compile: true
+amp_dtype: bfloat16     # bf16 on RTX 4090
 
-# Logging / checkpointing (counted in gradient updates, not env steps)
-log_interval: 50      # log every 50 gradient updates
-save_interval: 200    # checkpoint every 200 gradient updates
+# ----- Logging -----
+log_interval: 50
+save_interval: 200

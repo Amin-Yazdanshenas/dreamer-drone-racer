@@ -790,22 +790,6 @@ class DreamerV3Agent:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def barlow_twins_loss(z1: torch.Tensor, z2: torch.Tensor,
-                      lambd: float = 5e-4) -> torch.Tensor:
-    B, D = z1.shape
-    z1 = (z1 - z1.mean(0)) / (z1.std(0) + 1e-5)
-    z2 = (z2 - z2.mean(0)) / (z2.std(0) + 1e-5)
-    c = (z1.T @ z2) / B
-    on_diag = (1 - c.diagonal()).pow(2).sum()
-    off_diag = _off_diagonal(c).pow(2).sum()
-    return on_diag + lambd * off_diag
-
-
-def _off_diagonal(mat: torch.Tensor) -> torch.Tensor:
-    n = mat.shape[0]
-    return mat.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
-
-
 def _soft_update(target: nn.Module, source: nn.Module, alpha: float) -> None:
     """EMA update: target = (1-alpha)*target + alpha*source."""
     for tp, sp in zip(target.parameters(), source.parameters()):
