@@ -74,9 +74,12 @@ class MultiOneHotDist:
 
     def sample(self) -> torch.Tensor:
         probs = torch.softmax(self.logits, dim=-1)
-        idx = torch.multinomial(probs.flatten(0, -2), 1).squeeze(-1)
+        # torch.multinomial requires float32 — cast under AMP (bf16/fp16) to avoid
+        # "multinomial only supports floating-point dtypes (float32, float64)" error.
+        with torch.no_grad():
+            idx = torch.multinomial(probs.detach().float().flatten(0, -2), 1).squeeze(-1)
         idx = idx.reshape(self._shape[:-1])
-        one_hot = F.one_hot(idx, self.num_classes).float()
+        one_hot = F.one_hot(idx, self.num_classes).to(probs.dtype)
         return (one_hot.detach() + probs - probs.detach()).flatten(-2)
 
     def log_prob(self, x: torch.Tensor) -> torch.Tensor:

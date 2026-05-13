@@ -122,11 +122,16 @@ class RSSM(nn.Module):
 
     def img_step(self, prev_stoch: torch.Tensor, prev_deter: torch.Tensor,
                  action: torch.Tensor,
-                 reset_f: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                 reset_f: Optional[torch.Tensor] = None,
+                 sample: bool = True) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Imagination step (prior only).
 
         Returns: (prior_logits, prior_stoch, new_deter)
         prior_logits: (B, stoch, discrete) — reshaped to 2D
+
+        sample: if True (default, training path), draw straight-through categorical sample
+            from prior. If False, return argmax-mode one-hot. DreamerV3 / NM512 sample
+            during training and dream rollouts; mode is only for deterministic eval.
 
         reset_f: optional (B, 1) float mask. When provided, the action embedding is gated to
         zero on reset positions so the bias term of action_embed cannot leak a constant signal
@@ -141,17 +146,22 @@ class RSSM(nn.Module):
         prior_logits_flat = self.prior_mlp(new_deter)             # (B, z_dim)
         prior_logits = prior_logits_flat.reshape(-1, self.stoch, self.discrete)
         prior_dist = MultiOneHotDist(prior_logits)
-        prior_stoch = prior_dist.mode()                            # (B, z_dim) st straight-through
+        prior_stoch = prior_dist.sample() if sample else prior_dist.mode()  # straight-through
 
         return prior_logits, prior_stoch, new_deter
 
     def obs_step(self, prev_stoch: torch.Tensor, prev_deter: torch.Tensor,
                  action: torch.Tensor, embed: torch.Tensor,
-                 reset: Optional[torch.Tensor] = None) -> Tuple[
+                 reset: Optional[torch.Tensor] = None,
+                 sample: bool = True) -> Tuple[
                      torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Observation step (posterior).
 
         reset: (B,) bool or (B, 1) float — if True, zero out state for that env.
+        sample: if True (default, training/rollout path), draw straight-through categorical
+            samples from posterior and prior. If False, return argmax-mode one-hot — used
+            only for deterministic eval. Sampling is what DreamerV3 / NM512 do during both
+            world-model training and real-env rollouts; mode-only collapses latent diversity.
 
         Returns: (post_logits, post_stoch, prior_logits, prior_stoch, new_deter)
         All stoch tensors are (B, z_dim), deter is (B, h_dim),
@@ -168,12 +178,14 @@ class RSSM(nn.Module):
             # constant bias vector. Instead pass reset_f to img_step so the EMBEDDED action is
             # gated to zero.
 
-        prior_logits, prior_stoch, new_deter = self.img_step(prev_stoch, prev_deter, action, reset_f=reset_f)
+        prior_logits, prior_stoch, new_deter = self.img_step(
+            prev_stoch, prev_deter, action, reset_f=reset_f, sample=sample
+        )
 
         post_logits_flat = self.post_mlp(torch.cat([new_deter, embed], dim=-1))  # (B, z_dim)
         post_logits = post_logits_flat.reshape(-1, self.stoch, self.discrete)
         post_dist = MultiOneHotDist(post_logits)
-        post_stoch = post_dist.mode()                              # (B, z_dim) straight-through
+        post_stoch = post_dist.sample() if sample else post_dist.mode()  # straight-through
 
         return post_logits, post_stoch, prior_logits, prior_stoch, new_deter
 

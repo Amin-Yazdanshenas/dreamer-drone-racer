@@ -496,7 +496,8 @@ class DreamerV3Agent:
             embed = self.encoder(obs_in)
             reset_mask = is_first.to(self.device) if is_first is not None else None
             (_, post_stoch, _, _, new_deter) = self.rssm.obs_step(
-                stoch, deter, prev_action, embed, reset=reset_mask
+                stoch, deter, prev_action, embed, reset=reset_mask,
+                sample=not deterministic,
             )
 
         post_stoch = post_stoch.float()
