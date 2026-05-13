@@ -737,6 +737,13 @@ class DroneRacerEnvCfg_NoCam_Legacy_PLAY(DroneRacerEnvCfg_NoCam_PLAY):
         # Upstream PLAY behavior: no camera, no IMU. Lets the user run without --enable_cameras.
         self.scene.tiled_camera = None
         self.scene.imu = None
+        # CRITICAL: enable randomise_start so _resample_command calls reset_after_prev_gate
+        # on every episode reset. Without this, after a crash the drone stays in the crashed
+        # pose forever (next_gate_idx gets set to 0 but no pose write happens).
+        self.commands.target.randomise_start = True
+        # Disable the default fixed-corner reset_base — randomise_start handles repositioning
+        # to a random gate, which matches training and gives the policy a real chance to fly.
+        self.events.reset_base = None
 
 
 @configclass
@@ -760,3 +767,6 @@ class DroneRacerEnvCfg_NoCam_CTBR_Legacy_PLAY(DroneRacerEnvCfg_NoCam_CTBR_PLAY):
         super().__post_init__()
         self.scene.tiled_camera = None
         self.scene.imu = None
+        # Same respawn fix as the motor-omega Legacy_PLAY.
+        self.commands.target.randomise_start = True
+        self.events.reset_base = None
