@@ -139,7 +139,7 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_NoCam_CTBR",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_nocam.yaml",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_nocam_ctbr.yaml",
     },
 )
 
@@ -149,7 +149,7 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_NoCam_CTBR_PLAY",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_nocam.yaml",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_nocam_ctbr.yaml",
     },
 )
 
@@ -183,7 +183,7 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_NoCam_CTBR_Legacy",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_nocam.yaml",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_nocam_ctbr.yaml",
     },
 )
 
@@ -193,6 +193,6 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.drone_racer_env_cfg:DroneRacerEnvCfg_NoCam_CTBR_Legacy_PLAY",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_nocam.yaml",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_cfg_nocam_ctbr.yaml",
     },
 )
