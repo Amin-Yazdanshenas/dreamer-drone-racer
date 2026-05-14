@@ -36,6 +36,13 @@ beta_rep: 0.1           # rep KL weight
 kl_free: 1.0            # per-category free bits — main defence against posterior collapse
 loss_scale_barlow: 0.05
 
+# ----- Informed-Dreamer privileged-state decoder (SkyDreamer arXiv 2510.14783) -----
+# Decoder MLP reconstructs privileged ground-truth from latent: drone world pos/vel +
+# drone pos/vel in next-gate frame (12-dim). Forces latent to encode physical state.
+# Set priv_state_dim=0 to disable and revert to pure Barlow Twins.
+priv_state_dim: 12
+loss_scale_decoder: 1.0
+
 # ----- Actor-critic -----
 imag_horizon: 15        # imagination rollout length
 horizon: 333            # discount horizon → gamma = 1 - 1/333 ≈ 0.997

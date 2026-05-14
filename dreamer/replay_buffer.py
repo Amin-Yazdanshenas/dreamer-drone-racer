@@ -98,6 +98,13 @@ class SequenceReplayBuffer:
         rew_np = rewards.cpu().float().numpy()                  # (N,)
         first_np = is_first.cpu().bool().numpy()                # (N,)
         last_np = is_last.cpu().bool().numpy()                  # (N,)
+        # Privileged state for Informed-Dreamer decoder. Optional — older buffers
+        # without this key still work (agent skips decoder loss when key absent).
+        priv_np = (
+            obs_dict["priv_state"].cpu().float().numpy()
+            if "priv_state" in obs_dict
+            else None
+        )
 
         for i in range(N):
             step = {
@@ -108,6 +115,8 @@ class SequenceReplayBuffer:
                 "is_first": first_np[i],
                 "is_last": last_np[i],
             }
+            if priv_np is not None:
+                step["priv_state"] = priv_np[i]
             self._ep_bufs[i].append(step)
 
             if last_np[i]:

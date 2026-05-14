@@ -71,6 +71,14 @@ class DreamerConfig:
     barlow_lambd: float = 5e-4
     loss_scale_barlow: float = 0.05
 
+    # Informed-Dreamer privileged-state decoder (SkyDreamer-style grounding).
+    # When priv_state_dim > 0 the WM grows a decoder head MLP that reconstructs the
+    # privileged ground-truth state from the latent. Forces the latent to encode
+    # physical pose+velocity, not just image-consistent features. Setting dim=0
+    # disables the head and reverts to pure Barlow Twins repr.
+    priv_state_dim: int = 12
+    loss_scale_decoder: float = 1.0
+
     # Loss scales
     loss_scale_dyn: float = 1.0
     loss_scale_rep: float = 0.1
@@ -327,6 +335,15 @@ class DreamerV3Agent:
         self.reward_head = MLPHead(latent_dim, 255, units=cfg.hidden, layers=2).to(self.device)
         self.cont_head = MLPHead(latent_dim, 1, units=cfg.hidden, layers=2).to(self.device)
 
+        # Informed-Dreamer privileged-state decoder. Trained with symlog-MSE so it can
+        # handle both small (gate-frame coords <1m) and large (world pos ~10m) targets
+        # without the loss being dominated by world-pos magnitude.
+        self.priv_decoder: Optional[MLPHead] = None
+        if cfg.priv_state_dim > 0:
+            self.priv_decoder = MLPHead(
+                latent_dim, cfg.priv_state_dim, units=cfg.hidden, layers=2
+            ).to(self.device)
+
         # Barlow Twins projectors: one for RSSM latent, one for encoder embed.
         # They project into the same shared dim so BT can align them.
         self.projector_rssm = nn.Linear(latent_dim, cfg.mlp_units, bias=False).to(self.device)
@@ -366,7 +383,8 @@ class DreamerV3Agent:
     # ------------------------------------------------------------------
 
     def _get_wm_extra_params(self) -> list:
-        """Extra WM params (projectors / transformer). Uses hasattr for subclass safety."""
+        """Extra WM params (projectors / transformer / priv decoder). Uses hasattr/None
+        guards for subclass safety."""
         params: list = []
         if hasattr(self, "projector_rssm"):
             params += list(self.projector_rssm.parameters())
@@ -374,6 +392,8 @@ class DreamerV3Agent:
             params += list(self.projector_embed.parameters())
         if hasattr(self, "ne_transformer"):
             params += list(self.ne_transformer.parameters())
+        if getattr(self, "priv_decoder", None) is not None:
+            params += list(self.priv_decoder.parameters())
         return params
 
     def _get_wm_params(self) -> list:
@@ -423,6 +443,8 @@ class DreamerV3Agent:
             ckpt["projector_embed"] = self.projector_embed.state_dict()
         if hasattr(self, "ne_transformer"):
             ckpt["ne_transformer"] = self.ne_transformer.state_dict()
+        if getattr(self, "priv_decoder", None) is not None:
+            ckpt["priv_decoder"] = self.priv_decoder.state_dict()
         return ckpt
 
     def _load_checkpoint(self, ckpt: dict) -> None:
@@ -436,6 +458,8 @@ class DreamerV3Agent:
             self.projector_embed.load_state_dict(ckpt["projector_embed"])
         if "ne_transformer" in ckpt and hasattr(self, "ne_transformer"):
             self.ne_transformer.load_state_dict(ckpt["ne_transformer"])
+        if "priv_decoder" in ckpt and getattr(self, "priv_decoder", None) is not None:
+            self.priv_decoder.load_state_dict(ckpt["priv_decoder"])
         self.actor.load_state_dict(ckpt["actor"])
         self.critic.load_state_dict(ckpt["critic"])
         self.target_critic.load_state_dict(ckpt["target_critic"])
@@ -637,11 +661,20 @@ class DreamerV3Agent:
         embed_flat = embed.reshape(B * T, -1)
         repr_loss = self._repr_loss(latent, embed_flat, data["action"], B, T)
 
+        # Informed-Dreamer privileged-state decoder. Symlog-MSE so world-frame magnitudes
+        # (drone pos up to ~10 m) don't drown out gate-frame coords (<1 m).
+        decoder_loss = torch.zeros((), device=latent.device, dtype=latent.dtype)
+        if self.priv_decoder is not None and "priv_state" in data:
+            priv_pred = self.priv_decoder(latent)                              # (B*T, priv_dim)
+            priv_target = data["priv_state"].reshape(B * T, -1).to(latent.dtype)
+            decoder_loss = F.mse_loss(symlog(priv_pred), symlog(priv_target))
+
         total = (
             self.cfg.loss_scale_rew * rew_loss
             + self.cfg.loss_scale_con * cont_loss
             + self.cfg.loss_scale_dyn * kl_mean
             + self.cfg.loss_scale_barlow * repr_loss
+            + self.cfg.loss_scale_decoder * decoder_loss
         )
 
         # Replay buffer reward stats — confirm +10 gate rewards are entering the batch.
@@ -655,6 +688,7 @@ class DreamerV3Agent:
             "wm/kl": kl_mean.item(),
             "wm/kl_unclamped": kl_unclamped.item(),
             self._repr_loss_metric_key: repr_loss.item(),
+            "wm/decoder_loss": decoder_loss.item() if isinstance(decoder_loss, torch.Tensor) else 0.0,
             "wm/total": total.item(),
             "replay/reward_max": rew_max,
             "replay/reward_min": rew_min,
@@ -759,6 +793,8 @@ class DreamerV3Agent:
             self.projector_embed.train()
         if hasattr(self, "ne_transformer"):
             self.ne_transformer.train()
+        if getattr(self, "priv_decoder", None) is not None:
+            self.priv_decoder.train()
         self.actor.train()
         self.critic.train()
 
@@ -773,6 +809,8 @@ class DreamerV3Agent:
             self.projector_embed.eval()
         if hasattr(self, "ne_transformer"):
             self.ne_transformer.eval()
+        if getattr(self, "priv_decoder", None) is not None:
+            self.priv_decoder.eval()
         self.actor.eval()
         self.critic.eval()
 

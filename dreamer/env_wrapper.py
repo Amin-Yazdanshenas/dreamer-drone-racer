@@ -123,7 +123,12 @@ class DreamerIsaacEnvWrapper:
         target_pb = _compute_target_pos_b(robot, isaac, self.command_name).cpu()  # (N, 3)
         state = torch.cat([ang_vel, quat, lin_vel, target_pb], dim=-1).float()
 
-        return {"image": image.cpu(), "state": state}
+        # --- Privileged state for Informed-Dreamer decoder (12-dim) ---
+        # Ground-truth signals the actor does NOT see but the WM decoder reconstructs.
+        # Forces the latent to encode drone pose + velocity in both world and next-gate frame.
+        priv = _compute_priv_state(robot, isaac, self.command_name).cpu()  # (N, 12)
+
+        return {"image": image.cpu(), "state": state, "priv_state": priv}
 
     # ------------------------------------------------------------------
     # Passthroughs
@@ -208,3 +213,31 @@ def _compute_target_pos_b(robot, isaac_env, command_name: str) -> torch.Tensor:
         robot.data.root_pos_w, robot.data.root_quat_w, target_pos_w
     )
     return pos_b
+
+
+def _compute_priv_state(robot, isaac_env, command_name: str) -> torch.Tensor:
+    """Privileged ground-truth state for Informed-Dreamer decoder.
+
+    Layout (12-dim, all float32):
+        [0:3]   p_w  drone position in world frame
+        [3:6]   v_w  drone linear velocity in world frame
+        [6:9]   p_g  drone position in next-gate frame (origin = gate centre, axes = gate)
+        [9:12]  v_g  drone linear velocity in next-gate frame
+
+    Symlog-normalised inside the agent's decoder loss (positions can reach ~10 m, velocities
+    ~20 m/s — symlog squashes both to similar magnitude).
+    """
+    cmd = isaac_env.command_manager.get_term(command_name)
+    gate_pose = cmd.command  # (N, 7) — [pos_w, quat_w] of next gate
+    gate_pos_w = gate_pose[:, :3]
+    gate_quat_w = gate_pose[:, 3:7]
+
+    pos_w = robot.data.root_pos_w        # (N, 3)
+    vel_w = robot.data.root_lin_vel_w    # (N, 3)
+
+    # Drone in gate frame: translate then rotate by gate_quat^{-1}
+    p_g, _ = math_utils.subtract_frame_transforms(gate_pos_w, gate_quat_w, pos_w)
+    # Velocity is a free vector — only rotate
+    v_g = math_utils.quat_rotate_inverse(gate_quat_w, vel_w)
+
+    return torch.cat([pos_w, vel_w, p_g, v_g], dim=-1).float()  # (N, 12)
