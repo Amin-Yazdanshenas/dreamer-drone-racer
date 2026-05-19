@@ -161,7 +161,13 @@ class Actor(nn.Module):
     """Squashed-Gaussian actor over imagined latent states."""
 
     LOG_STD_MIN = -5.0
-    LOG_STD_MAX = 2.0
+    # Was 2.0 → std max = exp(2) = 7.4, far wider than the tanh squashing range. Pre-tanh
+    # samples landed in [-15, +15], tanh saturated to ±1, and `_tanh_log_det → log(1e-6) = -13`
+    # per saturated dim inflated reported entropy to ~13 nats (true tanh-squashed entropy ≤ 2.77
+    # for action_dim=4). entropy_scale * inflated_entropy then REWARDED saturation — self-
+    # reinforcing flyaway. LOG_STD_MAX=0 caps std at 1.0 → pre-tanh stays in N(mean, 1), tanh
+    # rarely saturates, entropy stays in physical range.
+    LOG_STD_MAX = 0.0
 
     def __init__(self, latent_dim: int, action_dim: int, units: int = 256,
                  layers: int = 4):
