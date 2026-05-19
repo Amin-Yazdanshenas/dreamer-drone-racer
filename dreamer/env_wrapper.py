@@ -238,6 +238,6 @@ def _compute_priv_state(robot, isaac_env, command_name: str) -> torch.Tensor:
     # Drone in gate frame: translate then rotate by gate_quat^{-1}
     p_g, _ = math_utils.subtract_frame_transforms(gate_pos_w, gate_quat_w, pos_w)
     # Velocity is a free vector — only rotate
-    v_g = math_utils.quat_rotate_inverse(gate_quat_w, vel_w)
+    v_g = math_utils.quat_apply_inverse(gate_quat_w, vel_w)
 
     return torch.cat([pos_w, vel_w, p_g, v_g], dim=-1).float()  # (N, 12)

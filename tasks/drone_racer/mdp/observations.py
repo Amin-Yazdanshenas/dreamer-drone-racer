@@ -269,15 +269,12 @@ def root_pose_g(
     drone_pos_w = drone_pose_w[:, :3]
     drone_quat_w = drone_pose_w[:, 3:7]
 
-    # Compute drone pose in gate frame
-    # Inverse gate quaternion
-    gate_quat_w_inv = math_utils.quat_inv(gate_quat_w)
-
-    # Position of drone in gate frame
+    # Compute drone pose in gate frame using inverse quat-apply (faster, non-deprecated).
     rel_pos = drone_pos_w - gate_pos_w
-    drone_pos_g = math_utils.quat_rotate(gate_quat_w_inv, rel_pos)
+    drone_pos_g = math_utils.quat_apply_inverse(gate_quat_w, rel_pos)
 
     # Orientation of drone in gate frame
+    gate_quat_w_inv = math_utils.quat_inv(gate_quat_w)
     drone_quat_g = math_utils.quat_mul(gate_quat_w_inv, drone_quat_w)
 
     # Concatenate position and quaternion
