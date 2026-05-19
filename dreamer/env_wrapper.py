@@ -35,7 +35,8 @@ class DreamerIsaacEnvWrapper:
         is_terminal : (N,) bool  — True on terminated (crash / flyaway)
     """
 
-    def __init__(self, gym_env, obs_mode: str = "rgb", command_name: str = "target"):
+    def __init__(self, gym_env, obs_mode: str = "rgb", command_name: str = "target",
+                 gatenet_ckpt: Optional[str] = None):
         self.env = gym_env
         self.obs_mode = obs_mode
         self.command_name = command_name
@@ -43,6 +44,27 @@ class DreamerIsaacEnvWrapper:
         self.num_envs: int = self._isaac.num_envs
         self._is_first: torch.Tensor = torch.ones(self.num_envs, dtype=torch.bool,
                                                    device="cpu")
+
+        # Optional GateNet for vision-based mask prediction (SkyDreamer Appendix A).
+        # When provided, mask is predicted from RGB instead of read from Isaac Sim's
+        # privileged semantic_segmentation channel — tests the sim-to-real path. The
+        # GateNet is loaded once, kept on the same device as the camera output, and
+        # run with eval()+no_grad() inside _extract_obs.
+        self._gatenet = None
+        if gatenet_ckpt is not None:
+            from .gatenet import GateNet  # local import — avoid forcing torch on bare imports
+            print(f"[DreamerIsaacEnvWrapper] loading GateNet from {gatenet_ckpt}")
+            ckpt = torch.load(gatenet_ckpt, map_location="cpu")
+            f = int(ckpt.get("f", 1))
+            in_ch = int(ckpt.get("in_channels", 3))
+            self._gatenet = GateNet(in_channels=in_ch, f=f)
+            self._gatenet.load_state_dict(ckpt["model"])
+            self._gatenet.eval()
+            # Move to GPU once we know where the camera output lives.
+            cam = self._isaac.scene["tiled_camera"]
+            seg_or_rgb = cam.data.output.get("rgb") or cam.data.output.get("semantic_segmentation")
+            if seg_or_rgb is not None:
+                self._gatenet = self._gatenet.to(seg_or_rgb.device)
 
     # ------------------------------------------------------------------
     # Public interface
@@ -101,13 +123,19 @@ class DreamerIsaacEnvWrapper:
         cam = isaac.scene["tiled_camera"]
 
         # --- Image ---
-        if self.obs_mode in ("rgb", "rgb_mask"):
+        need_rgb = self.obs_mode in ("rgb", "rgb_mask") or self._gatenet is not None
+        if need_rgb:
             rgb_raw = cam.data.output.get("rgb")  # (N, H, W, 4) RGBA uint8 or float
             rgb_u8 = _to_rgb_u8(rgb_raw)          # (N, H, W, 3) uint8
 
         if self.obs_mode in ("mask", "rgb_mask"):
-            seg = cam.data.output.get("semantic_segmentation")  # (N, H, W, 4) uint8
-            mask_u8 = _extract_gate_mask_u8(seg, isaac, self.command_name)  # (N, H, W, 1)
+            if self._gatenet is not None:
+                # Vision-predicted mask — no privileged segmentation. Drone sees a noisy
+                # all-gates mask exactly like the SkyDreamer deployment pipeline.
+                mask_u8 = _gatenet_predict_mask_u8(self._gatenet, rgb_u8)  # (N, H, W, 1)
+            else:
+                seg = cam.data.output.get("semantic_segmentation")  # (N, H, W, 4) uint8
+                mask_u8 = _extract_gate_mask_u8(seg, isaac, self.command_name)  # (N, H, W, 1)
 
         if self.obs_mode == "rgb":
             image = rgb_u8
@@ -204,6 +232,25 @@ def _extract_gate_mask_u8(seg: Optional[torch.Tensor],
     binary = (seg[..., 0] == class_ids[:, None, None])    # (N, H, W) bool
     mask_u8 = (binary.float() * 255).to(torch.uint8)      # (N, H, W) uint8
     return mask_u8.unsqueeze(-1).cpu()                     # (N, H, W, 1)
+
+
+@torch.no_grad()
+def _gatenet_predict_mask_u8(gatenet, rgb_u8: torch.Tensor) -> torch.Tensor:
+    """Run GateNet on RGB to produce (N, H, W, 1) uint8 binary gate mask.
+
+    rgb_u8: (N, H, W, 3) uint8 on any device.
+    Returns: (N, H, W, 1) uint8 on CPU (0 or 255).
+
+    SkyDreamer convention: any-gate mask (all gates merged). Differs from the
+    Isaac Sim path which filters to the target gate via class_id lookup.
+    """
+    device = next(gatenet.parameters()).device
+    x = rgb_u8.to(device).float() / 255.0          # (N, H, W, 3)
+    x = x.permute(0, 3, 1, 2).contiguous()          # (N, 3, H, W)
+    outputs = gatenet(x)                            # list of multi-scale logits
+    prob = torch.sigmoid(outputs[0])                # full-res, (N, 1, H, W)
+    mask = (prob > 0.5).to(torch.uint8) * 255       # binary 0/255
+    return mask.permute(0, 2, 3, 1).contiguous().cpu()  # (N, H, W, 1) uint8
 
 
 def _compute_target_pos_b(robot, isaac_env, command_name: str) -> torch.Tensor:

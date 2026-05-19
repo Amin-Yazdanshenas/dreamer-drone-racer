@@ -53,6 +53,11 @@ parser.add_argument("--render_interval", type=int, default=None,
                     help="Physics steps between viewport renders. Default: 16 non-headless "
                          "(smooth ~25 Hz viz without blocking sim), 100 headless (unused). "
                          "Lower = smoother viewport but more sim stalls when training kicks in.")
+parser.add_argument("--gatenet_ckpt", type=str, default=None,
+                    help="Path to a trained GateNet checkpoint. If set, the mask channel is "
+                         "predicted from RGB by GateNet instead of read from Isaac Sim's "
+                         "semantic_segmentation. Tests sim-to-real perception. Use with "
+                         "--obs_mode mask or rgb_mask.")
 parser.add_argument("--config", type=str, default=None,
                     help="Path to dreamer YAML config (default: auto from obs_mode).")
 parser.add_argument("--seed", type=int, default=42)
@@ -169,7 +174,11 @@ def main():
         print("[FPV] Recording enabled — only videos with ≥1 gate pass will be kept.")
 
     gym_env = gym.make(args_cli.task, cfg=env_cfg)
-    env = DreamerIsaacEnvWrapper(gym_env, obs_mode=args_cli.obs_mode)
+    env = DreamerIsaacEnvWrapper(
+        gym_env,
+        obs_mode=args_cli.obs_mode,
+        gatenet_ckpt=args_cli.gatenet_ckpt,
+    )
 
     device = args_cli.device or "cuda"
 

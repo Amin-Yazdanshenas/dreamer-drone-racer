@@ -33,6 +33,9 @@ parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--video", action="store_true", default=False,
                     help="Record an evaluation video (requires --enable_cameras).")
 parser.add_argument("--video_length", type=int, default=500)
+parser.add_argument("--gatenet_ckpt", type=str, default=None,
+                    help="Optional trained GateNet checkpoint. If set, the mask channel is "
+                         "predicted from RGB by GateNet instead of read from Isaac Sim seg.")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -128,7 +131,11 @@ def main():
             disable_logger=True,
         )
 
-    env = DreamerIsaacEnvWrapper(gym_env, obs_mode=args_cli.obs_mode)
+    env = DreamerIsaacEnvWrapper(
+        gym_env,
+        obs_mode=args_cli.obs_mode,
+        gatenet_ckpt=args_cli.gatenet_ckpt,
+    )
     device = args_cli.device or "cuda"
 
     if args_cli.agent == "ne_dreamer":
