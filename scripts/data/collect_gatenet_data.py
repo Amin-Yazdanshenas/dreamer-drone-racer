@@ -89,6 +89,10 @@ def main() -> None:
     masks_chunks: list = []
     collected = 0
 
+    # We need the gate class-id set, but it's populated only AFTER the first sim step.
+    # Discover it lazily below.
+    gate_class_ids: set = set()
+
     gym_env.reset()
     iters = (args_cli.num_steps + args_cli.num_envs - 1) // args_cli.num_envs
 
@@ -111,10 +115,34 @@ def main() -> None:
             rgb_u8 = rgb
         rgb_u8 = rgb_u8[..., :3]   # drop alpha if present
 
-        # Any-gate mask: Isaac Sim assigns class 0 to background, each gate gets its own
-        # positive class id. So `class_id > 0` flags every gate pixel.
+        # Filter the segmentation map to ONLY pixels whose class label starts with "gate_".
+        # Isaac Sim also assigns class IDs to ground / drone body / sky, so a naive
+        # `class_id > 0` rule labels the ground as a gate — this was the bug that produced
+        # the first GateNet's "yellow ground" failure mode.
+        if not gate_class_ids:
+            info = camera.data.info.get("semantic_segmentation", {})
+            id_to_labels = info.get("idToLabels", {})
+            for k, v in id_to_labels.items():
+                if isinstance(v, dict):
+                    name = v.get("class")
+                    if isinstance(name, str) and name.startswith("gate_"):
+                        try:
+                            gate_class_ids.add(int(k))
+                        except (TypeError, ValueError):
+                            pass
+            print(f"[GateNet-collect] discovered gate class IDs: "
+                  f"{sorted(gate_class_ids) or 'NONE — falling back to class_id > 0'}")
+
         class_id = seg[..., 0]
-        gate_mask = (class_id > 0).to(torch.uint8) * 255  # (N, H, W) uint8 0/255
+        if gate_class_ids:
+            # Bitwise-OR over the gate class set.
+            gate_mask = torch.zeros_like(class_id, dtype=torch.bool)
+            for cid in gate_class_ids:
+                gate_mask |= (class_id == cid)
+            gate_mask = gate_mask.to(torch.uint8) * 255
+        else:
+            # Fallback: no idToLabels available → keep old behaviour but warn loudly.
+            gate_mask = (class_id > 0).to(torch.uint8) * 255
 
         images_chunks.append(rgb_u8.cpu().numpy())
         masks_chunks.append(gate_mask.cpu().numpy())
