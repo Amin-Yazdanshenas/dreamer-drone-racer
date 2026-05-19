@@ -197,14 +197,15 @@ class RewardsCfg:
     progress = RewTerm(func=mdp.progress, weight=10.0, params={"command_name": "target"})
     gate_passed = RewTerm(func=mdp.gate_passed, weight=10000.0, params={"command_name": "target"})
     lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.5, params={"command_name": "target", "std": 0.5})
-    # Dense distance shaping — `pos_error_tanh` returns 1 at gate centre, falls to 0.24 at 2 m,
-    # ≈ 0 beyond 5 m. weight=2.0 × dt=0.01 → max ~0.02/step contribution. Provides a non-zero
-    # gradient toward the gate even when the policy never randomly stumbles through one (sparse
-    # reward starvation seen in the 357K-step mask run). Gate spike (+100/pass) still dominates.
+    # Dense distance shaping. Widened std (2 → 5) so signal persists at typical inter-gate
+    # distances (5-15 m on this track) instead of vanishing past 3 m. Weight bumped (2 → 20)
+    # so imagined returns over H=15 reach ~3.0 — clears the ReturnEMA scale floor (=0.1 after
+    # the matching change in networks.py) and gives the actor a non-zero policy gradient.
+    # Per-step max contribution ≈ 0.2 reward; gate spike (+100/pass) still 500× larger.
     near_gate = RewTerm(
         func=mdp.pos_error_tanh,
-        weight=2.0,
-        params={"command_name": "target", "std": 2.0},
+        weight=20.0,
+        params={"command_name": "target", "std": 5.0},
     )
 
 

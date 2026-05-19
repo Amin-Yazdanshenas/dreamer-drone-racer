@@ -294,20 +294,26 @@ class Projector(nn.Module):
 class ReturnEMA(nn.Module):
     """EMA percentile tracker for return normalisation.
 
-    Tracks 5th / 95th percentile via EMA. Provides scale = max(1, p95 - p5).
+    Tracks 5th / 95th percentile via EMA. Provides scale = max(scale_floor, p95 - p5).
     Compatible with nn.Module for state_dict save/load.
     """
 
-    def __init__(self, alpha: float = 0.02):
+    def __init__(self, alpha: float = 0.02, scale_floor: float = 0.1):
         super().__init__()
         self.alpha = alpha
+        # scale_floor lowered from 1.0 → 0.1 so the EMA actually normalises when imagined
+        # returns are small (sparse-reward early training). With the old 1.0 clamp, returns
+        # of magnitude 0.3 were left unscaled, target_norm stayed tiny, actor gradient ≈ 0,
+        # and entropy stayed frozen at init for hundreds of updates. The 0.1 floor still
+        # guards against amplifying pure noise (returns < 0.1 spread are kept un-normalised).
+        self.scale_floor = scale_floor
         self.register_buffer("lo", torch.tensor(0.0))
         self.register_buffer("hi", torch.tensor(1.0))
         self.register_buffer("initialized", torch.tensor(False))
 
     @property
     def scale(self) -> torch.Tensor:
-        return torch.clamp(self.hi - self.lo, min=1.0)
+        return torch.clamp(self.hi - self.lo, min=self.scale_floor)
 
     def update(self, values: torch.Tensor) -> None:
         v = values.detach().float()
