@@ -89,11 +89,39 @@ def main() -> None:
     masks_chunks: list = []
     collected = 0
 
-    # We need the gate class-id set, but it's populated only AFTER the first sim step.
-    # Discover it lazily below.
+    # We need the gate class-id set, but Isaac Sim populates idToLabels lazily — a gate
+    # only appears once it's been rendered in some camera. Pre-warm: step the env with
+    # random actions until the discovered class set matches the known gate count, or we
+    # run out of patience. Doing this BEFORE the collection loop guarantees every gate
+    # is labelled correctly in every saved frame.
     gate_class_ids: set = set()
-
+    expected_num_gates = int(isaac_env.scene["track"].num_objects)
+    print(f"[GateNet-collect] track has {expected_num_gates} gates; pre-warming to discover labels …")
     gym_env.reset()
+    for warm_it in range(500):
+        action = torch.rand(args_cli.num_envs, 4, device=device) * 2.0 - 1.0
+        gym_env.step(action)
+        info = camera.data.info.get("semantic_segmentation", {})
+        for k, v in info.get("idToLabels", {}).items():
+            if isinstance(v, dict):
+                name = v.get("class")
+                if isinstance(name, str) and name.startswith("gate_"):
+                    try:
+                        gate_class_ids.add(int(k))
+                    except (TypeError, ValueError):
+                        pass
+        if len(gate_class_ids) >= expected_num_gates:
+            break
+    print(f"[GateNet-collect] discovered after {warm_it + 1} warm steps: "
+          f"gate class IDs = {sorted(gate_class_ids)} "
+          f"({len(gate_class_ids)}/{expected_num_gates})")
+    if len(gate_class_ids) < expected_num_gates:
+        print("[GateNet-collect] WARN: some gates were never visible during warm-up; "
+              "their pixels will be labelled as background in this run. Increase warm "
+              "step budget or num_envs.")
+    # Fresh reset for the actual collection.
+    gym_env.reset()
+
     iters = (args_cli.num_steps + args_cli.num_envs - 1) // args_cli.num_envs
 
     for it in range(iters):
@@ -116,22 +144,23 @@ def main() -> None:
         rgb_u8 = rgb_u8[..., :3]   # drop alpha if present
 
         # Filter the segmentation map to ONLY pixels whose class label starts with "gate_".
-        # Isaac Sim also assigns class IDs to ground / drone body / sky, so a naive
-        # `class_id > 0` rule labels the ground as a gate — this was the bug that produced
-        # the first GateNet's "yellow ground" failure mode.
-        if not gate_class_ids:
-            info = camera.data.info.get("semantic_segmentation", {})
-            id_to_labels = info.get("idToLabels", {})
-            for k, v in id_to_labels.items():
-                if isinstance(v, dict):
-                    name = v.get("class")
-                    if isinstance(name, str) and name.startswith("gate_"):
-                        try:
-                            gate_class_ids.add(int(k))
-                        except (TypeError, ValueError):
-                            pass
-            print(f"[GateNet-collect] discovered gate class IDs: "
-                  f"{sorted(gate_class_ids) or 'NONE — falling back to class_id > 0'}")
+        # Re-check every step because Isaac Sim populates idToLabels lazily — a gate's
+        # class ID only appears once that gate has been rendered in at least one camera.
+        # On the first iteration only the gates visible from initial spawn poses are
+        # registered, so a single-shot snapshot misses the rest of the track.
+        info = camera.data.info.get("semantic_segmentation", {})
+        id_to_labels = info.get("idToLabels", {})
+        prev_count = len(gate_class_ids)
+        for k, v in id_to_labels.items():
+            if isinstance(v, dict):
+                name = v.get("class")
+                if isinstance(name, str) and name.startswith("gate_"):
+                    try:
+                        gate_class_ids.add(int(k))
+                    except (TypeError, ValueError):
+                        pass
+        if len(gate_class_ids) > prev_count:
+            print(f"[GateNet-collect] gate class IDs (it={it}): {sorted(gate_class_ids)}")
 
         class_id = seg[..., 0]
         if gate_class_ids:
