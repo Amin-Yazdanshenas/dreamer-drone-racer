@@ -39,27 +39,45 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from dreamer.gatenet import GateNet, gatenet_loss  # noqa: E402
+from dreamer.gatenet import GateNet, gatenet_loss, pose_loss  # noqa: E402
 
 
 class GateDataset(Dataset):
-    """In-memory dataset of (RGB image, gate mask) pairs."""
+    """In-memory dataset of (RGB image, gate mask, optional pose) tuples."""
 
-    def __init__(self, npz_path: str, augment: bool = True):
+    def __init__(self, npz_path: str, augment: bool = True, with_pose: bool = False):
         z = np.load(npz_path)
-        # (N, H, W, 3) uint8 → kept on CPU as uint8 to save RAM; converted in __getitem__.
         self.images: np.ndarray = z["images"]
-        # (N, H, W) uint8 in {0, 255}
         self.masks: np.ndarray = z["masks"]
         self.augment = augment
+        self.with_pose = with_pose
 
         assert self.images.shape[0] == self.masks.shape[0], "image/mask count mismatch"
         assert self.images.dtype == np.uint8, "expected uint8 images"
         assert self.images.shape[1:3] == self.masks.shape[1:3], "spatial mismatch"
 
+        if with_pose:
+            for key in ("target_idx", "target_pos_b", "target_quat_b",
+                        "target_pos_w", "target_visible"):
+                if key not in z:
+                    raise KeyError(
+                        f"--with_pose requires '{key}' in {npz_path}. "
+                        "Re-collect data with the updated collect_gatenet_data.py."
+                    )
+            self.target_idx: np.ndarray = z["target_idx"]            # (N,) uint8
+            self.target_pos_b: np.ndarray = z["target_pos_b"]        # (N, 3) f32
+            self.target_quat_b: np.ndarray = z["target_quat_b"]      # (N, 4) f32
+            self.target_pos_w: np.ndarray = z["target_pos_w"]        # (N, 3) f32
+            self.target_visible: np.ndarray = z["target_visible"]    # (N,) uint8
+            self.num_gates: int = int(z["num_gates"][0]) if "num_gates" in z \
+                                   else int(self.target_idx.max() + 1)
+        else:
+            self.num_gates = 0
+
         print(f"[GateDataset] {len(self.images)} samples  "
               f"image_shape={self.images.shape}  mask_shape={self.masks.shape}  "
-              f"augment={augment}")
+              f"augment={augment}  with_pose={with_pose} "
+              f"num_gates={self.num_gates}")
 
     def __len__(self) -> int:
         return len(self.images)
@@ -72,35 +90,92 @@ class GateDataset(Dataset):
         mask = mask.unsqueeze(0)                                   # (1, H, W)
 
         if self.augment:
-            # Shot noise — std=40/255 per SkyDreamer to mimic low-exposure camera noise.
             img = (img + torch.randn_like(img) * (40.0 / 255.0)).clamp(0.0, 1.0)
-
-            # Mask erosion: 50% chance, ~1 pixel erosion via 3×3 avg-pool + 0.99 threshold.
             if torch.rand(()) < 0.5:
-                # avg_pool2d needs (N, C, H, W)
                 eroded = F.avg_pool2d(mask.unsqueeze(0), kernel_size=3, stride=1, padding=1)
                 mask = (eroded.squeeze(0) >= 0.99).float()
 
-        return img, mask
+        if not self.with_pose:
+            return img, mask
+
+        item = {
+            "img": img,
+            "mask": mask,
+            "target_idx": int(self.target_idx[idx]),
+            "pos_b": torch.from_numpy(self.target_pos_b[idx]).float(),
+            "quat_b": torch.from_numpy(self.target_quat_b[idx]).float(),
+            "pos_w": torch.from_numpy(self.target_pos_w[idx]).float(),
+            "visible": float(self.target_visible[idx]),
+        }
+        return item
+
+
+def _onehot(idx: torch.Tensor, num_classes: int) -> torch.Tensor:
+    return F.one_hot(idx.long(), num_classes=num_classes).float()
 
 
 @torch.no_grad()
-def _validate(model: GateNet, loader: DataLoader, device: torch.device) -> dict:
+def _validate(model: GateNet, loader: DataLoader, device: torch.device,
+              with_pose: bool, num_gates: int) -> dict:
     model.eval()
     losses = []
     ious = []
-    for img, mask in loader:
-        img = img.to(device, non_blocking=True)
-        mask = mask.to(device, non_blocking=True)
-        outputs = model(img)
-        loss, _ = gatenet_loss(outputs, mask)
-        losses.append(loss.item())
-        # IoU on full-resolution prediction
-        pred = (torch.sigmoid(outputs[0]) > 0.5).float()
-        inter = (pred * mask).sum().item()
-        union = ((pred + mask) > 0).float().sum().clamp(min=1).item()
-        ious.append(inter / union)
-    return {"loss": float(np.mean(losses)), "iou": float(np.mean(ious))}
+    pose_b_errs, pos_w_errs, quat_b_errs, vis_accs = [], [], [], []
+
+    for batch in loader:
+        if with_pose:
+            img = batch["img"].to(device, non_blocking=True)
+            mask = batch["mask"].to(device, non_blocking=True)
+            tidx = batch["target_idx"].to(device, non_blocking=True)
+            oh = _onehot(tidx, num_gates)
+            out = model(img, oh)
+            mask_logits = out["mask_logits"]
+            mask_loss, _ = gatenet_loss(mask_logits, mask)
+            targets = {
+                "pos_b": batch["pos_b"].to(device),
+                "quat_b": batch["quat_b"].to(device),
+                "pos_w": batch["pos_w"].to(device),
+                "visible": batch["visible"].to(device),
+            }
+            pose_l, pose_m = pose_loss(out, targets)
+            losses.append((mask_loss + pose_l).item())
+
+            # IoU
+            pred = (torch.sigmoid(mask_logits[0]) > 0.5).float()
+            inter = (pred * mask).sum().item()
+            union = ((pred + mask) > 0).float().sum().clamp(min=1).item()
+            ious.append(inter / union)
+
+            # Pose metrics — only where target visible
+            vis_mask = targets["visible"].bool()
+            if vis_mask.any():
+                pose_b_err = (out["pos_b"][vis_mask] - targets["pos_b"][vis_mask]).pow(2).sum(-1).sqrt()
+                pose_b_errs.append(pose_b_err.mean().item())
+                quat_dot = (out["quat_b"][vis_mask] * targets["quat_b"][vis_mask]).sum(-1).abs()
+                quat_b_errs.append((1.0 - quat_dot.mean()).item())
+            pos_w_err = (out["pos_w"] - targets["pos_w"]).pow(2).sum(-1).sqrt().mean()
+            pos_w_errs.append(pos_w_err.item())
+            vis_pred = (torch.sigmoid(out["visible"]) > 0.5).float()
+            vis_accs.append((vis_pred == targets["visible"]).float().mean().item())
+        else:
+            img, mask = batch
+            img = img.to(device, non_blocking=True)
+            mask = mask.to(device, non_blocking=True)
+            outputs = model(img)
+            loss, _ = gatenet_loss(outputs, mask)
+            losses.append(loss.item())
+            pred = (torch.sigmoid(outputs[0]) > 0.5).float()
+            inter = (pred * mask).sum().item()
+            union = ((pred + mask) > 0).float().sum().clamp(min=1).item()
+            ious.append(inter / union)
+
+    out = {"loss": float(np.mean(losses)), "iou": float(np.mean(ious))}
+    if with_pose:
+        out["pos_b_err_m"] = float(np.mean(pose_b_errs)) if pose_b_errs else float("nan")
+        out["pos_w_err_m"] = float(np.mean(pos_w_errs))
+        out["quat_b_1mdot"] = float(np.mean(quat_b_errs)) if quat_b_errs else float("nan")
+        out["visible_acc"] = float(np.mean(vis_accs))
+    return out
 
 
 def main() -> None:
@@ -119,6 +194,14 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log_dir", type=str, default=None,
                    help="Override log dir (default: logs/gatenet/<timestamp>).")
+    p.add_argument("--with_pose", action="store_true", default=False,
+                   help="Train pose regression heads (target gate body-frame pos/quat + "
+                        "world-frame pos + visibility logit). Requires pose fields in the "
+                        ".npz from the updated collect_gatenet_data.py.")
+    p.add_argument("--mask_weight", type=float, default=1.0,
+                   help="Scale on the U-Net multi-scale mask loss when --with_pose is set.")
+    p.add_argument("--pose_weight", type=float, default=1.0,
+                   help="Scale on the pose-loss aggregate when --with_pose is set.")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -130,7 +213,7 @@ def main() -> None:
     # -----------------------------------------------------------------
     # Data
     # -----------------------------------------------------------------
-    ds_full = GateDataset(args.data, augment=True)
+    ds_full = GateDataset(args.data, augment=True, with_pose=args.with_pose)
     val_size = int(len(ds_full) * args.val_split)
     train_size = len(ds_full) - val_size
 
@@ -139,11 +222,9 @@ def main() -> None:
         generator=torch.Generator().manual_seed(args.seed),
     )
 
-    # Val should not be augmented. Subset wraps the original dataset reference, so
-    # toggle the flag on the underlying object during validation passes by using a
-    # second non-augmented view.
-    ds_val_clean = GateDataset(args.data, augment=False)
+    ds_val_clean = GateDataset(args.data, augment=False, with_pose=args.with_pose)
     ds_val.dataset = ds_val_clean   # type: ignore[attr-defined]
+    num_gates = ds_full.num_gates
 
     train_loader = DataLoader(
         ds_train, batch_size=args.batch_size, shuffle=True,
@@ -158,9 +239,14 @@ def main() -> None:
     # Model + optimizer
     # -----------------------------------------------------------------
     in_channels = ds_full.images.shape[-1]
-    model = GateNet(in_channels=in_channels, f=args.f).to(device)
+    model = GateNet(
+        in_channels=in_channels,
+        f=args.f,
+        num_gates=num_gates if args.with_pose else 0,
+    ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"[GateNet] in_channels={in_channels}  n_params={n_params:,}")
+    print(f"[GateNet] in_channels={in_channels}  n_params={n_params:,}  "
+          f"with_pose={args.with_pose}  num_gates={num_gates}")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
 
@@ -184,12 +270,30 @@ def main() -> None:
         model.train()
         epoch_loss = 0.0
         n_batches = 0
-        for img, mask in train_loader:
-            img = img.to(device, non_blocking=True)
-            mask = mask.to(device, non_blocking=True)
-
-            outputs = model(img)
-            loss, sub_metrics = gatenet_loss(outputs, mask)
+        for batch in train_loader:
+            if args.with_pose:
+                img = batch["img"].to(device, non_blocking=True)
+                mask = batch["mask"].to(device, non_blocking=True)
+                tidx = batch["target_idx"].to(device, non_blocking=True)
+                oh = _onehot(tidx, num_gates)
+                out = model(img, oh)
+                mask_l, mask_m = gatenet_loss(out["mask_logits"], mask)
+                targets = {
+                    "pos_b": batch["pos_b"].to(device),
+                    "quat_b": batch["quat_b"].to(device),
+                    "pos_w": batch["pos_w"].to(device),
+                    "visible": batch["visible"].to(device),
+                }
+                pose_l, pose_m = pose_loss(out, targets)
+                loss = args.mask_weight * mask_l + args.pose_weight * pose_l
+                sub_metrics = {f"mask/{k}": v for k, v in mask_m.items()}
+                sub_metrics.update({f"pose/{k}": v for k, v in pose_m.items()})
+            else:
+                img, mask = batch
+                img = img.to(device, non_blocking=True)
+                mask = mask.to(device, non_blocking=True)
+                outputs = model(img)
+                loss, sub_metrics = gatenet_loss(outputs, mask)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -206,14 +310,19 @@ def main() -> None:
 
         train_loss = epoch_loss / max(1, n_batches)
 
-        # Validation
-        val_metrics = _validate(model, val_loader, device)
-        writer.add_scalar("val/loss", val_metrics["loss"], step)
-        writer.add_scalar("val/iou", val_metrics["iou"], step)
+        val_metrics = _validate(model, val_loader, device, args.with_pose, num_gates)
+        for k, v in val_metrics.items():
+            writer.add_scalar(f"val/{k}", v, step)
+        pose_str = ""
+        if args.with_pose:
+            pose_str = (f"  pos_b_err={val_metrics['pos_b_err_m']:.3f}m  "
+                        f"quat_err={val_metrics['quat_b_1mdot']:.3f}  "
+                        f"pos_w_err={val_metrics['pos_w_err_m']:.3f}m  "
+                        f"vis_acc={val_metrics['visible_acc']:.3f}")
         print(f"epoch {epoch + 1:3d}/{args.epochs}  "
               f"train_loss={train_loss:.4f}  "
               f"val_loss={val_metrics['loss']:.4f}  "
-              f"val_iou={val_metrics['iou']:.4f}")
+              f"val_iou={val_metrics['iou']:.4f}{pose_str}")
 
         ckpt = {
             "model": model.state_dict(),
@@ -222,8 +331,11 @@ def main() -> None:
             "step": step,
             "val_loss": val_metrics["loss"],
             "val_iou": val_metrics["iou"],
+            "val_metrics": val_metrics,
             "f": args.f,
             "in_channels": in_channels,
+            "with_pose": args.with_pose,
+            "num_gates": num_gates if args.with_pose else 0,
         }
         torch.save(ckpt, os.path.join(ckpt_dir, "gatenet_latest.pt"))
         if val_metrics["loss"] < best_val_loss:

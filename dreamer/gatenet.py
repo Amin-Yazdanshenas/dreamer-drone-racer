@@ -61,21 +61,35 @@ class _Up(nn.Module):
 
 
 class GateNet(nn.Module):
-    """SkyDreamer GateNet U-Net.
+    """SkyDreamer GateNet U-Net with optional pose regression head.
 
-    Input:  (B, in_channels, H, W) float in [0, 1].
-    Output: list of 5 logit maps [y0, y1, y2, y3, y4]:
-            y0 — full resolution (H,W)
-            y1 — H/2, W/2
-            y2 — H/4, W/4
-            y3 — H/8, W/8
-            y4 — H/16, W/16 (bottleneck)
+    Two modes:
 
-    Apply `sigmoid` externally to get gate-probability masks.
+    1. Mask-only (default, `num_gates=0`) — paper original. Returns a list of 5
+       multi-scale logit maps for ANY-gate segmentation.
+
+    2. Mask + pose (`num_gates > 0`) — adds a pose-regression branch that
+       consumes the bottleneck feature plus a one-hot target-gate index and
+       outputs the target gate's body-frame position/orientation and world-
+       frame position, plus a visibility logit. Returns a dict instead of a
+       list. Used for the standalone-perception comparative-study baseline.
+
+    Forward signature changes accordingly:
+        mask-only: forward(image) -> list[5 × (B, 1, h, w)]
+        with pose: forward(image, target_idx_onehot) -> dict
+            {
+              "mask_logits": list[5 × (B, 1, h, w)],
+              "pos_b":  (B, 3)  — target gate position in body frame (metres),
+              "quat_b": (B, 4)  — target gate orientation in body frame (wxyz, unit),
+              "pos_w":  (B, 3)  — target gate position in world frame (metres),
+              "visible": (B,)   — logit; sigmoid gives P(target gate in view),
+            }
     """
 
-    def __init__(self, in_channels: int = 3, f: int = 1):
+    def __init__(self, in_channels: int = 3, f: int = 1, num_gates: int = 0,
+                 pose_hidden: int = 256):
         super().__init__()
+        self.num_gates = num_gates
 
         def c(n: int) -> int:
             return max(1, n // f)
@@ -98,6 +112,20 @@ class GateNet(nn.Module):
         self.outc3 = nn.Conv2d(c(256), 1, kernel_size=1)
         self.outc4 = nn.Conv2d(c(512), 1, kernel_size=1)
 
+        # Optional pose head. Consumes bottleneck feature (pooled) + one-hot
+        # target index → MLP → (pos_b, quat_b, pos_w, visible).
+        if num_gates > 0:
+            self._pool = nn.AdaptiveAvgPool2d(1)
+            in_dim = c(512) + num_gates
+            self.pose_trunk = nn.Sequential(
+                nn.Linear(in_dim, pose_hidden), nn.SiLU(),
+                nn.Linear(pose_hidden, pose_hidden), nn.SiLU(),
+            )
+            self.head_pos_b = nn.Linear(pose_hidden, 3)
+            self.head_quat_b = nn.Linear(pose_hidden, 4)
+            self.head_pos_w = nn.Linear(pose_hidden, 3)
+            self.head_visible = nn.Linear(pose_hidden, 1)
+
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -106,28 +134,52 @@ class GateNet(nn.Module):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
-        # Encoder
-        x1 = self.inc(x)               # (B, 64,  H,    W)
-        x2 = self.down1(x1)            # (B, 128, H/2,  W/2)
-        x3 = self.down2(x2)            # (B, 256, H/4,  W/4)
-        x4 = self.down3(x3)            # (B, 512, H/8,  W/8)
-        x5 = self.down4(x4)            # (B, 512, H/16, W/16)  bottleneck
+    def _encode(self, x: torch.Tensor):
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+        return x1, x2, x3, x4, x5
 
-        y4 = self.outc4(x5)            # H/16 prediction
-
-        # Decoder with skip connections
-        x = self.up1(x5, x4)           # (B, 256, H/8,  W/8)
-        y3 = self.outc3(x)
-        x = self.up2(x, x3)            # (B, 128, H/4,  W/4)
-        y2 = self.outc2(x)
-        x = self.up3(x, x2)            # (B, 64,  H/2,  W/2)
-        y1 = self.outc1(x)
-        x = self.up4(x, x1)            # (B, 64,  H,    W)
-        y0 = self.outc0(x)             # full-res prediction
-
+    def _decode_masks(self, x1, x2, x3, x4, x5):
+        y4 = self.outc4(x5)
+        x = self.up1(x5, x4); y3 = self.outc3(x)
+        x = self.up2(x, x3);  y2 = self.outc2(x)
+        x = self.up3(x, x2);  y1 = self.outc1(x)
+        x = self.up4(x, x1);  y0 = self.outc0(x)
         return [y0, y1, y2, y3, y4]
+
+    def forward(self, x: torch.Tensor, target_idx_onehot: torch.Tensor | None = None):
+        x1, x2, x3, x4, x5 = self._encode(x)
+        mask_logits = self._decode_masks(x1, x2, x3, x4, x5)
+
+        if self.num_gates == 0:
+            return mask_logits
+
+        if target_idx_onehot is None:
+            raise ValueError(
+                "GateNet was constructed with num_gates > 0; pass target_idx_onehot "
+                f"of shape (B, {self.num_gates})."
+            )
+
+        feat = self._pool(x5).flatten(1)                       # (B, c(512))
+        feat = torch.cat([feat, target_idx_onehot.float()], dim=-1)
+        trunk = self.pose_trunk(feat)
+        quat = self.head_quat_b(trunk)
+        quat = quat / quat.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+        return {
+            "mask_logits": mask_logits,
+            "pos_b": self.head_pos_b(trunk),
+            "quat_b": quat,
+            "pos_w": self.head_pos_w(trunk),
+            "visible": self.head_visible(trunk).squeeze(-1),
+        }
 
     @torch.no_grad()
     def predict_mask(self, x: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
@@ -136,8 +188,12 @@ class GateNet(nn.Module):
         x: (B, in_channels, H, W) float in [0, 1].
         Returns: (B, 1, H, W) uint8 in {0, 1}.
         """
-        outputs = self.forward(x)
-        prob = torch.sigmoid(outputs[0])
+        out = self.forward(x) if self.num_gates == 0 else None
+        if out is None:
+            # Pose-enabled model — feed a zero one-hot just for inference of the mask.
+            zero_onehot = torch.zeros(x.shape[0], self.num_gates, device=x.device)
+            out = self.forward(x, zero_onehot)["mask_logits"]
+        prob = torch.sigmoid(out[0])
         return (prob > threshold).to(torch.uint8)
 
 
@@ -190,4 +246,73 @@ def gatenet_loss(
         metrics[f"dice{i}"] = float(dice.item())
 
     metrics["total"] = float(total.item())
+    return total, metrics
+
+
+def quat_geodesic_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+    """Geodesic-style loss between unit quaternions: 1 - |q_pred · q_target|.
+
+    Both inputs (B, 4) assumed unit-norm (or normalised inside this fn). The
+    absolute value handles the q ≡ -q double-cover ambiguity.
+    """
+    pred = pred / pred.norm(dim=-1, keepdim=True).clamp(min=eps)
+    target = target / target.norm(dim=-1, keepdim=True).clamp(min=eps)
+    dot = (pred * target).sum(dim=-1).abs()
+    return (1.0 - dot).mean()
+
+
+def pose_loss(
+    pred: dict,
+    targets: dict,
+    weights: dict | None = None,
+) -> tuple[torch.Tensor, dict]:
+    """Combined pose-head loss.
+
+    pred  : dict with keys pos_b (B, 3), quat_b (B, 4), pos_w (B, 3), visible (B,)
+    targets: dict with keys pos_b, quat_b, pos_w, visible. Same shapes; visible is
+             float (B,) in {0, 1}.
+    weights: optional override for term weights; defaults to
+             {'pos_b': 1.0, 'quat_b': 1.0, 'pos_w': 0.5, 'visible': 0.5,
+              'mask_visible_only': True}.
+             If 'mask_visible_only' is True, pos_b/quat_b losses are computed
+             only over frames where the target gate is visible.
+    """
+    w = {
+        "pos_b": 1.0,
+        "quat_b": 1.0,
+        "pos_w": 0.5,
+        "visible": 0.5,
+        "mask_visible_only": True,
+    }
+    if weights:
+        w.update(weights)
+
+    vis = targets["visible"].float()                            # (B,)
+    vis_mask = vis.bool() if w["mask_visible_only"] else torch.ones_like(vis, dtype=torch.bool)
+    n_visible = int(vis_mask.sum().item())
+
+    if n_visible > 0:
+        pos_b_err = (pred["pos_b"] - targets["pos_b"]) ** 2
+        L_pos_b = pos_b_err[vis_mask].mean()
+        L_quat_b = quat_geodesic_loss(pred["quat_b"][vis_mask], targets["quat_b"][vis_mask])
+    else:
+        L_pos_b = torch.tensor(0.0, device=pred["pos_b"].device)
+        L_quat_b = torch.tensor(0.0, device=pred["quat_b"].device)
+
+    # World pose is always supervised — track is fixed so it's a label-lookup task
+    # invariant to visibility.
+    L_pos_w = F.mse_loss(pred["pos_w"], targets["pos_w"])
+    L_visible = F.binary_cross_entropy_with_logits(pred["visible"], vis)
+
+    total = (w["pos_b"] * L_pos_b + w["quat_b"] * L_quat_b
+             + w["pos_w"] * L_pos_w + w["visible"] * L_visible)
+
+    metrics = {
+        "L_pos_b": float(L_pos_b.item()),
+        "L_quat_b": float(L_quat_b.item()),
+        "L_pos_w": float(L_pos_w.item()),
+        "L_visible": float(L_visible.item()),
+        "pose_total": float(total.item()),
+        "n_visible": n_visible,
+    }
     return total, metrics

@@ -113,11 +113,14 @@ def main() -> None:
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     f = int(ckpt.get("f", 1))
     in_ch = int(ckpt.get("in_channels", 3))
-    print(f"[eval_gatenet] ckpt: f={f} in_ch={in_ch} "
+    with_pose = bool(ckpt.get("with_pose", False))
+    num_gates = int(ckpt.get("num_gates", 0))
+    print(f"[eval_gatenet] ckpt: f={f} in_ch={in_ch} with_pose={with_pose} "
+          f"num_gates={num_gates} "
           f"epoch={ckpt.get('epoch', '?')} val_loss={ckpt.get('val_loss', '?')} "
           f"val_iou={ckpt.get('val_iou', '?')}")
 
-    model = GateNet(in_channels=in_ch, f=f).to(device)
+    model = GateNet(in_channels=in_ch, f=f, num_gates=num_gates).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 
@@ -138,6 +141,19 @@ def main() -> None:
     # Run model in batches over val set
     # ------------------------------------------------------------------
     all_pred = np.empty((n_val, images.shape[1], images.shape[2]), dtype=np.uint8)
+    # Pose accumulators (only if checkpoint has pose head).
+    pose_target_idx = z["target_idx"] if with_pose and "target_idx" in z else None
+    if with_pose and pose_target_idx is None:
+        print("[eval_gatenet] WARN: ckpt has pose head but data .npz lacks target_idx; "
+              "skipping pose metrics.")
+        with_pose = False
+    pose_records = {
+        "pos_b_pred": [], "pos_b_gt": [],
+        "quat_b_pred": [], "quat_b_gt": [],
+        "pos_w_pred": [], "pos_w_gt": [],
+        "visible_pred": [], "visible_gt": [],
+    } if with_pose else None
+
     bs = args.batch_size
     with torch.no_grad():
         for start in range(0, n_val, bs):
@@ -146,7 +162,22 @@ def main() -> None:
             x_np = images[idx_chunk]
             x = torch.from_numpy(x_np).to(device).float() / 255.0  # (B, H, W, 3)
             x = x.permute(0, 3, 1, 2).contiguous()                  # (B, 3, H, W)
-            logits = model(x)[0]                                    # full-res, (B, 1, H, W)
+            if with_pose:
+                tidx = torch.from_numpy(z["target_idx"][idx_chunk]).long().to(device)
+                oh = torch.nn.functional.one_hot(tidx, num_gates).float()
+                out = model(x, oh)
+                logits = out["mask_logits"][0]
+                pose_records["pos_b_pred"].append(out["pos_b"].cpu().numpy())
+                pose_records["pos_b_gt"].append(z["target_pos_b"][idx_chunk])
+                pose_records["quat_b_pred"].append(out["quat_b"].cpu().numpy())
+                pose_records["quat_b_gt"].append(z["target_quat_b"][idx_chunk])
+                pose_records["pos_w_pred"].append(out["pos_w"].cpu().numpy())
+                pose_records["pos_w_gt"].append(z["target_pos_w"][idx_chunk])
+                pose_records["visible_pred"].append(
+                    (torch.sigmoid(out["visible"]) > 0.5).cpu().numpy().astype(np.uint8))
+                pose_records["visible_gt"].append(z["target_visible"][idx_chunk])
+            else:
+                logits = model(x)[0]
             prob = torch.sigmoid(logits)
             pred = (prob > args.threshold).to(torch.uint8) * 255    # (B, 1, H, W)
             all_pred[start:end] = pred.squeeze(1).cpu().numpy()
@@ -180,6 +211,55 @@ def main() -> None:
     print(f"  best-IoU sample         : {iou.max():.4f}")
     print()
 
+    pose_metrics = {}
+    if with_pose:
+        pos_b_pred = np.concatenate(pose_records["pos_b_pred"], axis=0)
+        pos_b_gt = np.concatenate(pose_records["pos_b_gt"], axis=0)
+        quat_b_pred = np.concatenate(pose_records["quat_b_pred"], axis=0)
+        quat_b_gt = np.concatenate(pose_records["quat_b_gt"], axis=0)
+        pos_w_pred = np.concatenate(pose_records["pos_w_pred"], axis=0)
+        pos_w_gt = np.concatenate(pose_records["pos_w_gt"], axis=0)
+        vis_pred = np.concatenate(pose_records["visible_pred"], axis=0)
+        vis_gt = np.concatenate(pose_records["visible_gt"], axis=0)
+
+        vis_mask = vis_gt.astype(bool)
+        pos_b_err_m = np.linalg.norm(pos_b_pred - pos_b_gt, axis=-1)
+        pos_w_err_m = np.linalg.norm(pos_w_pred - pos_w_gt, axis=-1)
+        quat_dot = np.abs(np.einsum("bi,bi->b", quat_b_pred, quat_b_gt))
+        quat_angle_rad = 2.0 * np.arccos(np.clip(quat_dot, 0.0, 1.0))
+        quat_angle_deg = np.rad2deg(quat_angle_rad)
+        vis_acc = (vis_pred == vis_gt).mean()
+        # Recall/precision on visibility classification
+        tp = int(((vis_pred == 1) & (vis_gt == 1)).sum())
+        fp = int(((vis_pred == 1) & (vis_gt == 0)).sum())
+        fn = int(((vis_pred == 0) & (vis_gt == 1)).sum())
+        vis_prec = tp / max(tp + fp, 1)
+        vis_recall = tp / max(tp + fn, 1)
+
+        print(f"=== Pose head ===")
+        print(f"  pos_b L2 error (visible) : mean={pos_b_err_m[vis_mask].mean():.3f} m  "
+              f"median={np.median(pos_b_err_m[vis_mask]):.3f} m  "
+              f"(n_visible={int(vis_mask.sum())})")
+        print(f"  pos_b L2 error (all)     : mean={pos_b_err_m.mean():.3f} m")
+        print(f"  pos_w L2 error           : mean={pos_w_err_m.mean():.3f} m  "
+              f"median={np.median(pos_w_err_m):.3f} m")
+        print(f"  quat_b angle (visible)   : mean={quat_angle_deg[vis_mask].mean():.2f}°  "
+              f"median={np.median(quat_angle_deg[vis_mask]):.2f}°")
+        print(f"  visibility accuracy      : {vis_acc:.4f}  "
+              f"(precision={vis_prec:.3f}  recall={vis_recall:.3f})")
+        print()
+
+        pose_metrics = {
+            "pos_b_err_visible_mean_m": float(pos_b_err_m[vis_mask].mean()),
+            "pos_b_err_visible_median_m": float(np.median(pos_b_err_m[vis_mask])),
+            "pos_w_err_mean_m": float(pos_w_err_m.mean()),
+            "quat_b_angle_visible_mean_deg": float(quat_angle_deg[vis_mask].mean()),
+            "quat_b_angle_visible_median_deg": float(np.median(quat_angle_deg[vis_mask])),
+            "visible_accuracy": float(vis_acc),
+            "visible_precision": float(vis_prec),
+            "visible_recall": float(vis_recall),
+        }
+
     # ------------------------------------------------------------------
     # Side-by-side PNG grids
     # ------------------------------------------------------------------
@@ -197,6 +277,8 @@ def main() -> None:
         fh.write(f"precision: {precision:.4f}\n")
         fh.write(f"recall: {recall:.4f}\n")
         fh.write(f"pixel_accuracy: {pix_acc:.4f}\n")
+        for k, v in pose_metrics.items():
+            fh.write(f"{k}: {v:.4f}\n")
 
     # Random sample grid
     n_show = min(args.num_samples, n_val)

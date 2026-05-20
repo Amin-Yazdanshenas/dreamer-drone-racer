@@ -55,6 +55,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import gymnasium as gym
+import isaaclab.utils.math as math_utils
 import numpy as np
 import torch
 
@@ -87,6 +88,13 @@ def main() -> None:
 
     images_chunks: list = []
     masks_chunks: list = []
+    # Per-frame extras — only saved when --save_pose is on (default).
+    target_idx_chunks: list = []
+    target_pos_b_chunks: list = []
+    target_quat_b_chunks: list = []
+    target_pos_w_chunks: list = []
+    target_quat_w_chunks: list = []
+    target_visible_chunks: list = []
     collected = 0
 
     # We need the gate class-id set, but Isaac Sim populates idToLabels lazily — a gate
@@ -175,6 +183,63 @@ def main() -> None:
 
         images_chunks.append(rgb_u8.cpu().numpy())
         masks_chunks.append(gate_mask.cpu().numpy())
+
+        # --- Per-frame pose labels for the comparative-study regression heads ---
+        # target_idx is the index (0..num_gates-1) of the gate the drone is currently
+        # supposed to fly through. Pull world-frame pose of that gate, then convert
+        # to drone body frame for the body-frame pose targets.
+        cmd = isaac_env.command_manager.get_term("target")
+        target_idx = cmd.next_gate_idx.long()                          # (N,)
+        track = isaac_env.scene["track"]
+        env_ids = torch.arange(args_cli.num_envs, device=device)
+        gate_pos_w = track.data.object_com_pos_w[env_ids, target_idx]   # (N, 3)
+        gate_quat_w = track.data.object_quat_w[env_ids, target_idx]     # (N, 4) wxyz
+
+        robot = isaac_env.scene["robot"]
+        drone_pos_w = robot.data.root_pos_w                              # (N, 3)
+        drone_quat_w = robot.data.root_quat_w                            # (N, 4)
+
+        # Body-frame position via Isaac Lab helper (gives gate position expressed in
+        # the drone body frame).
+        target_pos_b, _ = math_utils.subtract_frame_transforms(
+            drone_pos_w, drone_quat_w, gate_pos_w,
+        )
+        # Body-frame orientation: gate_quat_b = drone_quat_w^{-1} ⊗ gate_quat_w
+        drone_quat_w_inv = math_utils.quat_inv(drone_quat_w)
+        target_quat_b = math_utils.quat_mul(drone_quat_w_inv, gate_quat_w)
+
+        # Visibility: target gate has its own class_id (target_idx + 2 since IDs are
+        # contiguous starting at 2 on this track) — derive from idToLabels lookup
+        # we already built. For each env, check if THAT specific class id is present
+        # in the seg map. Fallback: any gate visible.
+        # idToLabels keys are strings; build name→id lookup once.
+        # We use the per-frame label set for correctness.
+        info = camera.data.info.get("semantic_segmentation", {})
+        name_to_id = {}
+        for k, v in info.get("idToLabels", {}).items():
+            if isinstance(v, dict):
+                nm = v.get("class")
+                if isinstance(nm, str) and nm.startswith("gate_"):
+                    try:
+                        name_to_id[nm] = int(k)
+                    except (TypeError, ValueError):
+                        pass
+        # Per-env class id of the *target* gate
+        target_cls = torch.zeros(args_cli.num_envs, dtype=class_id.dtype, device=class_id.device)
+        for i in range(args_cli.num_envs):
+            tname = f"gate_{int(target_idx[i].item()) + 1}"
+            target_cls[i] = name_to_id.get(tname, 0)
+        # Visible iff the target-class id appears in ANY pixel of that env's seg map
+        visible = ((class_id == target_cls[:, None, None]).reshape(args_cli.num_envs, -1)
+                   .any(dim=1).to(torch.uint8))
+
+        target_idx_chunks.append(target_idx.to(torch.uint8).cpu().numpy())
+        target_pos_b_chunks.append(target_pos_b.cpu().numpy().astype(np.float32))
+        target_quat_b_chunks.append(target_quat_b.cpu().numpy().astype(np.float32))
+        target_pos_w_chunks.append(gate_pos_w.cpu().numpy().astype(np.float32))
+        target_quat_w_chunks.append(gate_quat_w.cpu().numpy().astype(np.float32))
+        target_visible_chunks.append(visible.cpu().numpy())
+
         collected += rgb_u8.shape[0]
 
         if (it + 1) % 50 == 0:
@@ -185,16 +250,38 @@ def main() -> None:
 
     images = np.concatenate(images_chunks, axis=0)[: args_cli.num_steps]
     masks = np.concatenate(masks_chunks, axis=0)[: args_cli.num_steps]
+    target_idx_arr = np.concatenate(target_idx_chunks, axis=0)[: args_cli.num_steps]
+    pos_b_arr = np.concatenate(target_pos_b_chunks, axis=0)[: args_cli.num_steps]
+    quat_b_arr = np.concatenate(target_quat_b_chunks, axis=0)[: args_cli.num_steps]
+    pos_w_arr = np.concatenate(target_pos_w_chunks, axis=0)[: args_cli.num_steps]
+    quat_w_arr = np.concatenate(target_quat_w_chunks, axis=0)[: args_cli.num_steps]
+    target_visible_arr = np.concatenate(target_visible_chunks, axis=0)[: args_cli.num_steps]
 
     # Sanity stats
     gate_pixel_frac = float((masks > 0).mean())
     visible_frac = float((masks.reshape(masks.shape[0], -1) > 0).any(axis=1).mean())
+    target_visible_frac = float(target_visible_arr.mean())
     print(f"[GateNet-collect] images {images.shape} {images.dtype}  "
           f"masks {masks.shape} {masks.dtype}  "
-          f"gate_pixel_frac={gate_pixel_frac:.4f}  visible_frac={visible_frac:.4f}")
+          f"gate_pixel_frac={gate_pixel_frac:.4f}  any_visible_frac={visible_frac:.4f}  "
+          f"target_visible_frac={target_visible_frac:.4f}")
+    print(f"[GateNet-collect] pose ranges: "
+          f"pos_b min/max={pos_b_arr.min():.2f}/{pos_b_arr.max():.2f}  "
+          f"pos_w min/max={pos_w_arr.min():.2f}/{pos_w_arr.max():.2f}")
 
     os.makedirs(os.path.dirname(args_cli.output) or ".", exist_ok=True)
-    np.savez_compressed(args_cli.output, images=images, masks=masks)
+    np.savez_compressed(
+        args_cli.output,
+        images=images,
+        masks=masks,
+        target_idx=target_idx_arr,
+        target_pos_b=pos_b_arr,
+        target_quat_b=quat_b_arr,
+        target_pos_w=pos_w_arr,
+        target_quat_w=quat_w_arr,
+        target_visible=target_visible_arr,
+        num_gates=np.array([expected_num_gates], dtype=np.int32),
+    )
     print(f"[GateNet-collect] saved to {args_cli.output}")
 
     gym_env.close()
