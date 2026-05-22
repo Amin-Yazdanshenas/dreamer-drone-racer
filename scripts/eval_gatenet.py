@@ -27,6 +27,11 @@ import os
 import sys
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -77,7 +82,7 @@ def _draw_birdseye(ax, pos_b_gt: np.ndarray, quat_b_gt: np.ndarray,
     is GT, red is prediction. Square axes; axis range = ±span_m metres.
     """
     # Drone triangle (forward = +x)
-    ax.add_patch(plt.matplotlib.patches.Polygon(
+    ax.add_patch(mpatches.Polygon(
         [[0.4, 0.0], [-0.2, 0.25], [-0.2, -0.25]], closed=True, color="blue", alpha=0.7))
 
     for pos_b, quat_b, color in (
@@ -119,12 +124,6 @@ def _make_grid_png(out_path: str, rgb: np.ndarray, gt: np.ndarray, pred: np.ndar
                          When provided, an extra column shows a top-down BEV with
                          pose error overlay. visible: (N,) bool/uint8 — for caption.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    # Re-bind for use inside _draw_birdseye.
-    plt.matplotlib = matplotlib
-
     n = rgb.shape[0]
     with_pose = pose_gt is not None and pose_pred is not None
     cols = 5 if with_pose else 4
