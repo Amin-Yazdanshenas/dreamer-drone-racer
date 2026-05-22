@@ -49,20 +49,86 @@ def _per_image_iou(pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
     return iou
 
 
+def _quat_rotate_vec(quat_wxyz: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Rotate vector v by unit quaternion q = (w, x, y, z). Isaac Lab convention.
+
+    quat_wxyz: (..., 4)  v: (..., 3)   → returns (..., 3).
+    """
+    w = quat_wxyz[..., 0]; x = quat_wxyz[..., 1]
+    y = quat_wxyz[..., 2]; z = quat_wxyz[..., 3]
+    # Quaternion → rotation matrix (row-vector convention applied to v).
+    R = np.stack([
+        1 - 2*(y*y + z*z),     2*(x*y - z*w),     2*(x*z + y*w),
+        2*(x*y + z*w),     1 - 2*(x*x + z*z),     2*(y*z - x*w),
+        2*(x*z - y*w),         2*(y*z + x*w), 1 - 2*(x*x + y*y),
+    ], axis=-1).reshape(*quat_wxyz.shape[:-1], 3, 3)
+    return np.einsum("...ij,...j->...i", R, v)
+
+
+def _draw_birdseye(ax, pos_b_gt: np.ndarray, quat_b_gt: np.ndarray,
+                   pos_b_pred: np.ndarray, quat_b_pred: np.ndarray,
+                   visible: bool, gate_half_width: float = 0.75,
+                   span_m: float = 8.0) -> None:
+    """Top-down (x-y body frame) sketch of drone + GT + predicted gate.
+
+    Drone is a small triangle at origin pointing +x_b (forward).
+    Each gate is drawn as a short line segment centred on its predicted body-frame
+    position, perpendicular to its body-frame x-axis (the gate's normal). Green
+    is GT, red is prediction. Square axes; axis range = ±span_m metres.
+    """
+    # Drone triangle (forward = +x)
+    ax.add_patch(plt.matplotlib.patches.Polygon(
+        [[0.4, 0.0], [-0.2, 0.25], [-0.2, -0.25]], closed=True, color="blue", alpha=0.7))
+
+    for pos_b, quat_b, color in (
+        (pos_b_gt, quat_b_gt, "green"),
+        (pos_b_pred, quat_b_pred, "red"),
+    ):
+        # Gate normal in body frame = quat_b ⊗ [1,0,0]; gate plane spans the perpendicular.
+        # Lateral axis (gate y-axis in body frame) ≈ quat_b ⊗ [0,1,0].
+        lateral = _quat_rotate_vec(quat_b, np.array([0.0, 1.0, 0.0]))
+        end_a = pos_b[:2] + gate_half_width * lateral[:2]
+        end_b = pos_b[:2] - gate_half_width * lateral[:2]
+        ax.plot([end_a[0], end_b[0]], [end_a[1], end_b[1]],
+                color=color, linewidth=2.5)
+        ax.scatter([pos_b[0]], [pos_b[1]], color=color, s=15, zorder=3)
+
+    ax.set_xlim(-span_m, span_m); ax.set_ylim(-span_m, span_m)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.3, linewidth=0.4)
+    ax.set_xlabel("x_b [m]  (forward)", fontsize=6); ax.set_ylabel("y_b [m]", fontsize=6)
+    ax.tick_params(labelsize=6)
+    pos_err = float(np.linalg.norm(pos_b_gt - pos_b_pred))
+    dot = abs(float((quat_b_gt * quat_b_pred).sum()))
+    ang_deg = float(np.rad2deg(2.0 * np.arccos(np.clip(dot, 0.0, 1.0))))
+    vis_str = "vis=Y" if visible else "vis=N"
+    ax.set_title(f"BEV  Δp={pos_err:.2f}m  Δθ={ang_deg:.1f}°  {vis_str}", fontsize=7)
+
+
 def _make_grid_png(out_path: str, rgb: np.ndarray, gt: np.ndarray, pred: np.ndarray,
-                   ious: np.ndarray) -> None:
-    """Save an N×4 grid: RGB | GT | Pred | Overlay (GT=green, Pred=red, intersect=yellow).
+                   ious: np.ndarray,
+                   pose_gt: dict | None = None,
+                   pose_pred: dict | None = None,
+                   visible: np.ndarray | None = None) -> None:
+    """Save an N×K grid: RGB | GT | Pred | Overlay [| BEV].
 
     rgb : (N, H, W, 3) uint8
     gt  : (N, H, W)    uint8 0/255
     pred: (N, H, W)    uint8 0/255
+    pose_gt / pose_pred : optional dicts with keys 'pos_b' (N, 3), 'quat_b' (N, 4).
+                         When provided, an extra column shows a top-down BEV with
+                         pose error overlay. visible: (N,) bool/uint8 — for caption.
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    # Re-bind for use inside _draw_birdseye.
+    plt.matplotlib = matplotlib
 
     n = rgb.shape[0]
-    fig, axes = plt.subplots(n, 4, figsize=(8, 2 * n))
+    with_pose = pose_gt is not None and pose_pred is not None
+    cols = 5 if with_pose else 4
+    fig, axes = plt.subplots(n, cols, figsize=(2 * cols, 2 * n))
     if n == 1:
         axes = axes[None, :]
 
@@ -70,16 +136,25 @@ def _make_grid_png(out_path: str, rgb: np.ndarray, gt: np.ndarray, pred: np.ndar
         gt_b = gt[i] > 0
         pr_b = pred[i] > 0
         overlay = np.zeros((*gt[i].shape, 3), dtype=np.uint8)
-        overlay[gt_b] = (0, 200, 0)         # GT only → green
-        overlay[pr_b] = (200, 0, 0)         # Pred only → red
-        overlay[gt_b & pr_b] = (220, 220, 0)  # intersect → yellow
+        overlay[gt_b] = (0, 200, 0)
+        overlay[pr_b] = (200, 0, 0)
+        overlay[gt_b & pr_b] = (220, 220, 0)
 
         axes[i, 0].imshow(rgb[i]); axes[i, 0].set_title(f"RGB (IoU={ious[i]:.2f})", fontsize=8)
-        axes[i, 1].imshow(gt[i], cmap="gray", vmin=0, vmax=255); axes[i, 1].set_title("GT", fontsize=8)
-        axes[i, 2].imshow(pred[i], cmap="gray", vmin=0, vmax=255); axes[i, 2].set_title("Pred", fontsize=8)
+        axes[i, 1].imshow(gt[i], cmap="gray", vmin=0, vmax=255); axes[i, 1].set_title("GT mask", fontsize=8)
+        axes[i, 2].imshow(pred[i], cmap="gray", vmin=0, vmax=255); axes[i, 2].set_title("Pred mask", fontsize=8)
         axes[i, 3].imshow(overlay); axes[i, 3].set_title("Overlay (G=GT R=Pred Y=both)", fontsize=8)
-        for ax in axes[i]:
+        for ax in axes[i, :4]:
             ax.axis("off")
+
+        if with_pose:
+            vis_i = bool(visible[i]) if visible is not None else True
+            _draw_birdseye(
+                axes[i, 4],
+                pose_gt["pos_b"][i], pose_gt["quat_b"][i],
+                pose_pred["pos_b"][i], pose_pred["quat_b"][i],
+                visible=vis_i,
+            )
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=120, bbox_inches="tight")
@@ -280,27 +355,77 @@ def main() -> None:
         for k, v in pose_metrics.items():
             fh.write(f"{k}: {v:.4f}\n")
 
+    # If pose head is enabled, pre-stack the per-sample pose arrays so grids can
+    # include a body-frame bird's-eye view (column 5).
+    if with_pose:
+        pose_pred_all = {
+            "pos_b": np.concatenate(pose_records["pos_b_pred"], axis=0),
+            "quat_b": np.concatenate(pose_records["quat_b_pred"], axis=0),
+        }
+        pose_gt_all = {
+            "pos_b": z["target_pos_b"][val_idx],
+            "quat_b": z["target_quat_b"][val_idx],
+        }
+        visible_all = z["target_visible"][val_idx]
+    else:
+        pose_pred_all = pose_gt_all = None
+        visible_all = None
+
+    def _slice_pose(idx_arr):
+        if not with_pose:
+            return None, None, None
+        return (
+            {"pos_b": pose_gt_all["pos_b"][idx_arr], "quat_b": pose_gt_all["quat_b"][idx_arr]},
+            {"pos_b": pose_pred_all["pos_b"][idx_arr], "quat_b": pose_pred_all["quat_b"][idx_arr]},
+            visible_all[idx_arr],
+        )
+
     # Random sample grid
     n_show = min(args.num_samples, n_val)
     rng2 = np.random.default_rng(seed=0)
     sample_idx = rng2.choice(n_val, size=n_show, replace=False)
+    pg, pp, vis = _slice_pose(sample_idx)
     _make_grid_png(
         os.path.join(out_dir, "grid.png"),
         images[val_idx[sample_idx]],
         gt[sample_idx],
         all_pred[sample_idx],
         iou[sample_idx],
+        pose_gt=pg, pose_pred=pp, visible=vis,
     )
 
     # Worst-IoU grid
     worst_idx = np.argsort(iou)[:16]
+    pg, pp, vis = _slice_pose(worst_idx)
     _make_grid_png(
         os.path.join(out_dir, "worst_iou.png"),
         images[val_idx[worst_idx]],
         gt[worst_idx],
         all_pred[worst_idx],
         iou[worst_idx],
+        pose_gt=pg, pose_pred=pp, visible=vis,
     )
+
+    # Worst-pose grid (only when pose head present) — highlight large pos_b errors
+    # where the target gate IS visible. These are the failure modes that matter for
+    # downstream control.
+    if with_pose:
+        pose_err = np.linalg.norm(
+            pose_pred_all["pos_b"] - pose_gt_all["pos_b"], axis=-1
+        )
+        vis_mask = visible_all.astype(bool)
+        if vis_mask.any():
+            cand = np.where(vis_mask)[0]
+            worst_pose = cand[np.argsort(pose_err[cand])[::-1][:16]]
+            pg, pp, vis = _slice_pose(worst_pose)
+            _make_grid_png(
+                os.path.join(out_dir, "worst_pose.png"),
+                images[val_idx[worst_pose]],
+                gt[worst_pose],
+                all_pred[worst_pose],
+                iou[worst_pose],
+                pose_gt=pg, pose_pred=pp, visible=vis,
+            )
 
     print(f"[eval_gatenet] artifacts → {out_dir}")
 
