@@ -202,7 +202,10 @@ def _make_grid_png(out_path: str, rgb: np.ndarray, gt: np.ndarray, pred: np.ndar
             ax.axis("off")
 
         if with_pose:
-            vis_i = bool(visible[i]) if visible is not None else True
+            # visible[i] can be either a scalar uint8/bool (single-target ckpt) or a
+            # (G,) numpy array (multi-gate ckpt). _draw_birdseye auto-detects mode
+            # from pos_b_gt.ndim, so just pass the entry through unchanged.
+            vis_i = visible[i] if visible is not None else True
             _draw_birdseye(
                 axes[i, 4],
                 pose_gt["pos_b"][i], pose_gt["quat_b"][i],
