@@ -72,17 +72,16 @@ def _quat_rotate_vec(quat_wxyz: np.ndarray, v: np.ndarray) -> np.ndarray:
 
 def _draw_birdseye(ax, pos_b_gt: np.ndarray, quat_b_gt: np.ndarray,
                    pos_b_pred: np.ndarray, quat_b_pred: np.ndarray,
-                   visible: bool, gate_half_width: float = 0.75,
+                   visible, gate_half_width: float = 0.75,
                    span_m: float = 8.0,
                    hfov_deg: float = 47.0) -> None:
-    """Top-down (x_b vs y_b body frame) sketch of drone, camera FOV, GT and predicted gate.
+    """Top-down (x_b vs y_b body frame) sketch.
 
-    Drone (blue triangle) at origin pointing +x_b (forward). A light grey wedge marks
-    the camera's horizontal field of view — pose predictions outside this wedge are
-    unconstrained because the gate is not visible to the network. GT green / pred red.
-
-    visible: GT visibility of the target gate. When False, both segments are drawn
-    dashed and the title is annotated to indicate the prediction is uninformative.
+    Accepts EITHER single-gate or multi-gate inputs:
+      - Single-gate: pos_b_gt shape (3,), quat (4,), visible scalar.
+      - Multi-gate : pos_b_gt shape (G, 3), quat (G, 4), visible (G,).
+    Auto-detects from `pos_b_gt.ndim`. In multi-gate mode, every gate that is
+    EITHER GT-visible or pred-visible is drawn, labelled with its index (1..G).
     """
     # Drone triangle (forward = +x)
     ax.add_patch(mpatches.Polygon(
@@ -100,32 +99,67 @@ def _draw_birdseye(ax, pos_b_gt: np.ndarray, quat_b_gt: np.ndarray,
         zorder=0,
     ))
 
-    # Dashed when GT says the gate is not visible to the camera — emphasises that
-    # both GT and prediction lie outside the network's input signal.
-    line_style = "--" if not visible else "-"
-    line_width = 2.0 if not visible else 2.6
-
-    for pos_b, quat_b, color in (
-        (pos_b_gt, quat_b_gt, "green"),
-        (pos_b_pred, quat_b_pred, "red"),
-    ):
-        lateral = _quat_rotate_vec(quat_b, np.array([0.0, 1.0, 0.0]))
-        end_a = pos_b[:2] + gate_half_width * lateral[:2]
-        end_b = pos_b[:2] - gate_half_width * lateral[:2]
-        ax.plot([end_a[0], end_b[0]], [end_a[1], end_b[1]],
-                color=color, linewidth=line_width, linestyle=line_style, zorder=3)
-        ax.scatter([pos_b[0]], [pos_b[1]], color=color, s=15, zorder=3)
+    multi = pos_b_gt.ndim == 2
+    if multi:
+        G = pos_b_gt.shape[0]
+        vis_arr = np.asarray(visible).astype(bool).reshape(-1)
+        pos_errs = []
+        ang_errs = []
+        for g in range(G):
+            v = bool(vis_arr[g])
+            if not v:
+                continue   # only draw gates that are at least GT-visible
+            line_style = "-"
+            line_width = 2.2
+            for pos_b, quat_b, color in (
+                (pos_b_gt[g], quat_b_gt[g], "green"),
+                (pos_b_pred[g], quat_b_pred[g], "red"),
+            ):
+                lateral = _quat_rotate_vec(quat_b, np.array([0.0, 1.0, 0.0]))
+                end_a = pos_b[:2] + gate_half_width * lateral[:2]
+                end_b = pos_b[:2] - gate_half_width * lateral[:2]
+                ax.plot([end_a[0], end_b[0]], [end_a[1], end_b[1]],
+                        color=color, linewidth=line_width, linestyle=line_style, zorder=3)
+                ax.scatter([pos_b[0]], [pos_b[1]], color=color, s=12, zorder=3)
+            # Label gate index near the GT centre
+            ax.annotate(f"g{g + 1}", (pos_b_gt[g, 0], pos_b_gt[g, 1]),
+                        fontsize=6, color="black",
+                        xytext=(2, 2), textcoords="offset points")
+            pos_errs.append(float(np.linalg.norm(pos_b_gt[g] - pos_b_pred[g])))
+            dot = abs(float((quat_b_gt[g] * quat_b_pred[g]).sum()))
+            ang_errs.append(float(np.rad2deg(2.0 * np.arccos(np.clip(dot, 0.0, 1.0)))))
+        n_vis = int(vis_arr.sum())
+        if pos_errs:
+            title = (f"BEV (multi)  n_vis={n_vis}  "
+                     f"meanΔp={np.mean(pos_errs):.2f}m  meanΔθ={np.mean(ang_errs):.1f}°")
+        else:
+            title = f"BEV (multi)  no visible gates"
+        ax.set_title(title, fontsize=7)
+    else:
+        # Single-gate legacy path.
+        line_style = "--" if not visible else "-"
+        line_width = 2.0 if not visible else 2.6
+        for pos_b, quat_b, color in (
+            (pos_b_gt, quat_b_gt, "green"),
+            (pos_b_pred, quat_b_pred, "red"),
+        ):
+            lateral = _quat_rotate_vec(quat_b, np.array([0.0, 1.0, 0.0]))
+            end_a = pos_b[:2] + gate_half_width * lateral[:2]
+            end_b = pos_b[:2] - gate_half_width * lateral[:2]
+            ax.plot([end_a[0], end_b[0]], [end_a[1], end_b[1]],
+                    color=color, linewidth=line_width, linestyle=line_style, zorder=3)
+            ax.scatter([pos_b[0]], [pos_b[1]], color=color, s=15, zorder=3)
+        pos_err = float(np.linalg.norm(pos_b_gt - pos_b_pred))
+        dot = abs(float((quat_b_gt * quat_b_pred).sum()))
+        ang_deg = float(np.rad2deg(2.0 * np.arccos(np.clip(dot, 0.0, 1.0))))
+        vis_str = "vis=Y" if visible else "vis=N (pred unconstrained)"
+        ax.set_title(f"BEV  Δp={pos_err:.2f}m  Δθ={ang_deg:.1f}°  {vis_str}", fontsize=7)
 
     ax.set_xlim(-span_m, span_m); ax.set_ylim(-span_m, span_m)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, alpha=0.3, linewidth=0.4)
     ax.set_xlabel("x_b [m]  (forward)", fontsize=6); ax.set_ylabel("y_b [m]", fontsize=6)
     ax.tick_params(labelsize=6)
-    pos_err = float(np.linalg.norm(pos_b_gt - pos_b_pred))
-    dot = abs(float((quat_b_gt * quat_b_pred).sum()))
-    ang_deg = float(np.rad2deg(2.0 * np.arccos(np.clip(dot, 0.0, 1.0))))
-    vis_str = "vis=Y" if visible else "vis=N (pred unconstrained)"
-    ax.set_title(f"BEV  Δp={pos_err:.2f}m  Δθ={ang_deg:.1f}°  {vis_str}", fontsize=7)
 
 
 def _make_grid_png(out_path: str, rgb: np.ndarray, gt: np.ndarray, pred: np.ndarray,
@@ -206,13 +240,14 @@ def main() -> None:
     f = int(ckpt.get("f", 1))
     in_ch = int(ckpt.get("in_channels", 3))
     with_pose = bool(ckpt.get("with_pose", False))
+    multi_gate = bool(ckpt.get("multi_gate", False))
     num_gates = int(ckpt.get("num_gates", 0))
     print(f"[eval_gatenet] ckpt: f={f} in_ch={in_ch} with_pose={with_pose} "
-          f"num_gates={num_gates} "
+          f"multi_gate={multi_gate} num_gates={num_gates} "
           f"epoch={ckpt.get('epoch', '?')} val_loss={ckpt.get('val_loss', '?')} "
           f"val_iou={ckpt.get('val_iou', '?')}")
 
-    model = GateNet(in_channels=in_ch, f=f, num_gates=num_gates).to(device)
+    model = GateNet(in_channels=in_ch, f=f, num_gates=num_gates, multi_gate=multi_gate).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 
@@ -233,12 +268,19 @@ def main() -> None:
     # Run model in batches over val set
     # ------------------------------------------------------------------
     all_pred = np.empty((n_val, images.shape[1], images.shape[2]), dtype=np.uint8)
-    # Pose accumulators (only if checkpoint has pose head).
-    pose_target_idx = z["target_idx"] if with_pose and "target_idx" in z else None
-    if with_pose and pose_target_idx is None:
-        print("[eval_gatenet] WARN: ckpt has pose head but data .npz lacks target_idx; "
-              "skipping pose metrics.")
-        with_pose = False
+
+    # Determine which pose-label keys to load (single-target vs multi-gate).
+    if with_pose:
+        if multi_gate:
+            need_keys = ("all_pos_b", "all_quat_b", "all_pos_w", "all_visible")
+        else:
+            need_keys = ("target_idx", "target_pos_b", "target_quat_b",
+                         "target_pos_w", "target_visible")
+        if any(k not in z for k in need_keys):
+            print(f"[eval_gatenet] WARN: ckpt has pose head but data .npz lacks {need_keys}; "
+                  "skipping pose metrics.")
+            with_pose = False
+
     pose_records = {
         "pos_b_pred": [], "pos_b_gt": [],
         "quat_b_pred": [], "quat_b_gt": [],
@@ -255,19 +297,32 @@ def main() -> None:
             x = torch.from_numpy(x_np).to(device).float() / 255.0  # (B, H, W, 3)
             x = x.permute(0, 3, 1, 2).contiguous()                  # (B, 3, H, W)
             if with_pose:
-                tidx = torch.from_numpy(z["target_idx"][idx_chunk]).long().to(device)
-                oh = torch.nn.functional.one_hot(tidx, num_gates).float()
-                out = model(x, oh)
-                logits = out["mask_logits"][0]
-                pose_records["pos_b_pred"].append(out["pos_b"].cpu().numpy())
-                pose_records["pos_b_gt"].append(z["target_pos_b"][idx_chunk])
-                pose_records["quat_b_pred"].append(out["quat_b"].cpu().numpy())
-                pose_records["quat_b_gt"].append(z["target_quat_b"][idx_chunk])
-                pose_records["pos_w_pred"].append(out["pos_w"].cpu().numpy())
-                pose_records["pos_w_gt"].append(z["target_pos_w"][idx_chunk])
-                pose_records["visible_pred"].append(
-                    (torch.sigmoid(out["visible"]) > 0.5).cpu().numpy().astype(np.uint8))
-                pose_records["visible_gt"].append(z["target_visible"][idx_chunk])
+                if multi_gate:
+                    out = model(x)
+                    logits = out["mask_logits"][0]
+                    pose_records["pos_b_pred"].append(out["pos_b"].cpu().numpy())     # (B, G, 3)
+                    pose_records["pos_b_gt"].append(z["all_pos_b"][idx_chunk])
+                    pose_records["quat_b_pred"].append(out["quat_b"].cpu().numpy())   # (B, G, 4)
+                    pose_records["quat_b_gt"].append(z["all_quat_b"][idx_chunk])
+                    pose_records["pos_w_pred"].append(out["pos_w"].cpu().numpy())     # (B, G, 3)
+                    pose_records["pos_w_gt"].append(z["all_pos_w"][idx_chunk])
+                    pose_records["visible_pred"].append(
+                        (torch.sigmoid(out["visible"]) > 0.5).cpu().numpy().astype(np.uint8))
+                    pose_records["visible_gt"].append(z["all_visible"][idx_chunk])
+                else:
+                    tidx = torch.from_numpy(z["target_idx"][idx_chunk]).long().to(device)
+                    oh = torch.nn.functional.one_hot(tidx, num_gates).float()
+                    out = model(x, oh)
+                    logits = out["mask_logits"][0]
+                    pose_records["pos_b_pred"].append(out["pos_b"].cpu().numpy())
+                    pose_records["pos_b_gt"].append(z["target_pos_b"][idx_chunk])
+                    pose_records["quat_b_pred"].append(out["quat_b"].cpu().numpy())
+                    pose_records["quat_b_gt"].append(z["target_quat_b"][idx_chunk])
+                    pose_records["pos_w_pred"].append(out["pos_w"].cpu().numpy())
+                    pose_records["pos_w_gt"].append(z["target_pos_w"][idx_chunk])
+                    pose_records["visible_pred"].append(
+                        (torch.sigmoid(out["visible"]) > 0.5).cpu().numpy().astype(np.uint8))
+                    pose_records["visible_gt"].append(z["target_visible"][idx_chunk])
             else:
                 logits = model(x)[0]
             prob = torch.sigmoid(logits)
@@ -314,6 +369,18 @@ def main() -> None:
         vis_pred = np.concatenate(pose_records["visible_pred"], axis=0)
         vis_gt = np.concatenate(pose_records["visible_gt"], axis=0)
 
+        # Reshape multi-gate arrays so per-(b, g) cells become flat rows. Then the
+        # rest of the metric code is identical to the single-target path.
+        if multi_gate:
+            pos_b_pred = pos_b_pred.reshape(-1, 3)
+            pos_b_gt = pos_b_gt.reshape(-1, 3)
+            quat_b_pred = quat_b_pred.reshape(-1, 4)
+            quat_b_gt = quat_b_gt.reshape(-1, 4)
+            pos_w_pred = pos_w_pred.reshape(-1, 3)
+            pos_w_gt = pos_w_gt.reshape(-1, 3)
+            vis_pred = vis_pred.reshape(-1)
+            vis_gt = vis_gt.reshape(-1)
+
         vis_mask = vis_gt.astype(bool)
         pos_b_err_m = np.linalg.norm(pos_b_pred - pos_b_gt, axis=-1)
         pos_w_err_m = np.linalg.norm(pos_w_pred - pos_w_gt, axis=-1)
@@ -321,14 +388,14 @@ def main() -> None:
         quat_angle_rad = 2.0 * np.arccos(np.clip(quat_dot, 0.0, 1.0))
         quat_angle_deg = np.rad2deg(quat_angle_rad)
         vis_acc = (vis_pred == vis_gt).mean()
-        # Recall/precision on visibility classification
         tp = int(((vis_pred == 1) & (vis_gt == 1)).sum())
         fp = int(((vis_pred == 1) & (vis_gt == 0)).sum())
         fn = int(((vis_pred == 0) & (vis_gt == 1)).sum())
         vis_prec = tp / max(tp + fp, 1)
         vis_recall = tp / max(tp + fn, 1)
 
-        print(f"=== Pose head ===")
+        unit = "per-(frame,gate)" if multi_gate else "per-frame"
+        print(f"=== Pose head ({unit}) ===")
         print(f"  pos_b L2 error (visible) : mean={pos_b_err_m[vis_mask].mean():.3f} m  "
               f"median={np.median(pos_b_err_m[vis_mask]):.3f} m  "
               f"(n_visible={int(vis_mask.sum())})")
@@ -339,6 +406,11 @@ def main() -> None:
               f"median={np.median(quat_angle_deg[vis_mask]):.2f}°")
         print(f"  visibility accuracy      : {vis_acc:.4f}  "
               f"(precision={vis_prec:.3f}  recall={vis_recall:.3f})")
+        if multi_gate:
+            G = num_gates
+            # Per-gate visibility accuracy (helps see if any one gate is hard to detect).
+            per_gate_acc = (vis_pred.reshape(-1, G) == vis_gt.reshape(-1, G)).mean(0)
+            print(f"  per-gate visibility acc  : {[round(float(v), 3) for v in per_gate_acc]}")
         print()
 
         pose_metrics = {
@@ -373,17 +445,34 @@ def main() -> None:
             fh.write(f"{k}: {v:.4f}\n")
 
     # If pose head is enabled, pre-stack the per-sample pose arrays so grids can
-    # include a body-frame bird's-eye view (column 5).
+    # include a body-frame bird's-eye view (column 5). For multi_gate, predictions
+    # and GT are (N, G, ...) — the BEV helper handles both shapes.
     if with_pose:
-        pose_pred_all = {
-            "pos_b": np.concatenate(pose_records["pos_b_pred"], axis=0),
-            "quat_b": np.concatenate(pose_records["quat_b_pred"], axis=0),
-        }
-        pose_gt_all = {
-            "pos_b": z["target_pos_b"][val_idx],
-            "quat_b": z["target_quat_b"][val_idx],
-        }
-        visible_all = z["target_visible"][val_idx]
+        if multi_gate:
+            # Re-pull stacked arrays in the (N, G, ...) layout (pre-flatten copies).
+            pose_pred_all = {
+                "pos_b": np.concatenate(
+                    [arr.reshape(arr.shape[0], num_gates, 3) if arr.ndim == 3 else arr
+                     for arr in pose_records["pos_b_pred"]], axis=0),
+                "quat_b": np.concatenate(
+                    [arr.reshape(arr.shape[0], num_gates, 4) if arr.ndim == 3 else arr
+                     for arr in pose_records["quat_b_pred"]], axis=0),
+            }
+            pose_gt_all = {
+                "pos_b": z["all_pos_b"][val_idx],
+                "quat_b": z["all_quat_b"][val_idx],
+            }
+            visible_all = z["all_visible"][val_idx]    # (n_val, G)
+        else:
+            pose_pred_all = {
+                "pos_b": np.concatenate(pose_records["pos_b_pred"], axis=0),
+                "quat_b": np.concatenate(pose_records["quat_b_pred"], axis=0),
+            }
+            pose_gt_all = {
+                "pos_b": z["target_pos_b"][val_idx],
+                "quat_b": z["target_quat_b"][val_idx],
+            }
+            visible_all = z["target_visible"][val_idx]
     else:
         pose_pred_all = pose_gt_all = None
         visible_all = None
@@ -431,9 +520,19 @@ def main() -> None:
             pose_pred_all["pos_b"] - pose_gt_all["pos_b"], axis=-1
         )
         vis_mask = visible_all.astype(bool)
-        if vis_mask.any():
+
+        if multi_gate:
+            # Per-frame "badness" = MAX pos_b error over visible gates. Frames with no
+            # visible gates are excluded from the worst-pose grid (no signal to score).
+            err_masked = np.where(vis_mask, pose_err, -1.0)        # (N, G)
+            per_frame_err = err_masked.max(axis=1)                  # (N,)
+            cand = np.where(vis_mask.any(axis=1))[0]
+        else:
+            per_frame_err = pose_err                                # (N,)
             cand = np.where(vis_mask)[0]
-            worst_pose = cand[np.argsort(pose_err[cand])[::-1][:16]]
+
+        if len(cand) > 0:
+            worst_pose = cand[np.argsort(per_frame_err[cand])[::-1][:16]]
             pg, pp, vis = _slice_pose(worst_pose)
             _make_grid_png(
                 os.path.join(out_dir, "worst_pose.png"),

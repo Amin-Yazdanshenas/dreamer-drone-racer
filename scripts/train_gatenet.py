@@ -39,18 +39,20 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from dreamer.gatenet import GateNet, gatenet_loss, pose_loss  # noqa: E402
+from dreamer.gatenet import GateNet, gatenet_loss, pose_loss, pose_loss_multi  # noqa: E402
 
 
 class GateDataset(Dataset):
     """In-memory dataset of (RGB image, gate mask, optional pose) tuples."""
 
-    def __init__(self, npz_path: str, augment: bool = True, with_pose: bool = False):
+    def __init__(self, npz_path: str, augment: bool = True, with_pose: bool = False,
+                 multi_gate: bool = False):
         z = np.load(npz_path)
         self.images: np.ndarray = z["images"]
         self.masks: np.ndarray = z["masks"]
         self.augment = augment
         self.with_pose = with_pose
+        self.multi_gate = multi_gate
 
         assert self.images.shape[0] == self.masks.shape[0], "image/mask count mismatch"
         assert self.images.dtype == np.uint8, "expected uint8 images"
@@ -64,13 +66,25 @@ class GateDataset(Dataset):
                         f"--with_pose requires '{key}' in {npz_path}. "
                         "Re-collect data with the updated collect_gatenet_data.py."
                     )
-            self.target_idx: np.ndarray = z["target_idx"]            # (N,) uint8
-            self.target_pos_b: np.ndarray = z["target_pos_b"]        # (N, 3) f32
-            self.target_quat_b: np.ndarray = z["target_quat_b"]      # (N, 4) f32
-            self.target_pos_w: np.ndarray = z["target_pos_w"]        # (N, 3) f32
-            self.target_visible: np.ndarray = z["target_visible"]    # (N,) uint8
+            self.target_idx: np.ndarray = z["target_idx"]
+            self.target_pos_b: np.ndarray = z["target_pos_b"]
+            self.target_quat_b: np.ndarray = z["target_quat_b"]
+            self.target_pos_w: np.ndarray = z["target_pos_w"]
+            self.target_visible: np.ndarray = z["target_visible"]
             self.num_gates: int = int(z["num_gates"][0]) if "num_gates" in z \
                                    else int(self.target_idx.max() + 1)
+
+            if multi_gate:
+                for key in ("all_pos_b", "all_quat_b", "all_pos_w", "all_visible"):
+                    if key not in z:
+                        raise KeyError(
+                            f"--multi_gate requires '{key}' in {npz_path}. "
+                            "Re-collect with the latest collect_gatenet_data.py."
+                        )
+                self.all_pos_b: np.ndarray = z["all_pos_b"]      # (N, G, 3) f32
+                self.all_quat_b: np.ndarray = z["all_quat_b"]    # (N, G, 4) f32
+                self.all_pos_w: np.ndarray = z["all_pos_w"]      # (N, G, 3) f32
+                self.all_visible: np.ndarray = z["all_visible"]  # (N, G) uint8
         else:
             self.num_gates = 0
 
@@ -98,7 +112,17 @@ class GateDataset(Dataset):
         if not self.with_pose:
             return img, mask
 
-        item = {
+        if self.multi_gate:
+            return {
+                "img": img,
+                "mask": mask,
+                "pos_b": torch.from_numpy(self.all_pos_b[idx]).float(),       # (G, 3)
+                "quat_b": torch.from_numpy(self.all_quat_b[idx]).float(),     # (G, 4)
+                "pos_w": torch.from_numpy(self.all_pos_w[idx]).float(),       # (G, 3)
+                "visible": torch.from_numpy(self.all_visible[idx]).float(),   # (G,)
+            }
+
+        return {
             "img": img,
             "mask": mask,
             "target_idx": int(self.target_idx[idx]),
@@ -107,7 +131,6 @@ class GateDataset(Dataset):
             "pos_w": torch.from_numpy(self.target_pos_w[idx]).float(),
             "visible": float(self.target_visible[idx]),
         }
-        return item
 
 
 def _onehot(idx: torch.Tensor, num_classes: int) -> torch.Tensor:
@@ -116,7 +139,7 @@ def _onehot(idx: torch.Tensor, num_classes: int) -> torch.Tensor:
 
 @torch.no_grad()
 def _validate(model: GateNet, loader: DataLoader, device: torch.device,
-              with_pose: bool, num_gates: int) -> dict:
+              with_pose: bool, num_gates: int, multi_gate: bool = False) -> dict:
     model.eval()
     losses = []
     ious = []
@@ -126,27 +149,42 @@ def _validate(model: GateNet, loader: DataLoader, device: torch.device,
         if with_pose:
             img = batch["img"].to(device, non_blocking=True)
             mask = batch["mask"].to(device, non_blocking=True)
-            tidx = batch["target_idx"].to(device, non_blocking=True)
-            oh = _onehot(tidx, num_gates)
-            out = model(img, oh)
-            mask_logits = out["mask_logits"]
-            mask_loss, _ = gatenet_loss(mask_logits, mask)
-            targets = {
-                "pos_b": batch["pos_b"].to(device),
-                "quat_b": batch["quat_b"].to(device),
-                "pos_w": batch["pos_w"].to(device),
-                "visible": batch["visible"].to(device),
-            }
-            pose_l, pose_m = pose_loss(out, targets)
+
+            if multi_gate:
+                out = model(img)
+                mask_logits = out["mask_logits"]
+                mask_loss, _ = gatenet_loss(mask_logits, mask)
+                targets = {
+                    "pos_b": batch["pos_b"].to(device),
+                    "quat_b": batch["quat_b"].to(device),
+                    "pos_w": batch["pos_w"].to(device),
+                    "visible": batch["visible"].to(device),
+                }
+                pose_l, _ = pose_loss_multi(out, targets)
+            else:
+                tidx = batch["target_idx"].to(device, non_blocking=True)
+                oh = _onehot(tidx, num_gates)
+                out = model(img, oh)
+                mask_logits = out["mask_logits"]
+                mask_loss, _ = gatenet_loss(mask_logits, mask)
+                targets = {
+                    "pos_b": batch["pos_b"].to(device),
+                    "quat_b": batch["quat_b"].to(device),
+                    "pos_w": batch["pos_w"].to(device),
+                    "visible": batch["visible"].to(device),
+                }
+                pose_l, _ = pose_loss(out, targets)
+
             losses.append((mask_loss + pose_l).item())
 
-            # IoU
+            # Mask IoU on the full-res prediction
             pred = (torch.sigmoid(mask_logits[0]) > 0.5).float()
             inter = (pred * mask).sum().item()
             union = ((pred + mask) > 0).float().sum().clamp(min=1).item()
             ious.append(inter / union)
 
-            # Pose metrics — only where target visible
+            # Pose metrics — averaged over visible-only entries (flat across gates
+            # for multi_gate mode).
             vis_mask = targets["visible"].bool()
             if vis_mask.any():
                 pose_b_err = (out["pos_b"][vis_mask] - targets["pos_b"][vis_mask]).pow(2).sum(-1).sqrt()
@@ -169,13 +207,13 @@ def _validate(model: GateNet, loader: DataLoader, device: torch.device,
             union = ((pred + mask) > 0).float().sum().clamp(min=1).item()
             ious.append(inter / union)
 
-    out = {"loss": float(np.mean(losses)), "iou": float(np.mean(ious))}
+    out_dict = {"loss": float(np.mean(losses)), "iou": float(np.mean(ious))}
     if with_pose:
-        out["pos_b_err_m"] = float(np.mean(pose_b_errs)) if pose_b_errs else float("nan")
-        out["pos_w_err_m"] = float(np.mean(pos_w_errs))
-        out["quat_b_1mdot"] = float(np.mean(quat_b_errs)) if quat_b_errs else float("nan")
-        out["visible_acc"] = float(np.mean(vis_accs))
-    return out
+        out_dict["pos_b_err_m"] = float(np.mean(pose_b_errs)) if pose_b_errs else float("nan")
+        out_dict["pos_w_err_m"] = float(np.mean(pos_w_errs))
+        out_dict["quat_b_1mdot"] = float(np.mean(quat_b_errs)) if quat_b_errs else float("nan")
+        out_dict["visible_acc"] = float(np.mean(vis_accs))
+    return out_dict
 
 
 def main() -> None:
@@ -198,6 +236,10 @@ def main() -> None:
                    help="Train pose regression heads (target gate body-frame pos/quat + "
                         "world-frame pos + visibility logit). Requires pose fields in the "
                         ".npz from the updated collect_gatenet_data.py.")
+    p.add_argument("--multi_gate", action="store_true", default=False,
+                   help="Predict pose for ALL gates simultaneously instead of one target "
+                        "gate. Drops the target_idx conditioning input. Requires --with_pose "
+                        "and the per-gate (all_*) arrays from the latest collector.")
     p.add_argument("--mask_weight", type=float, default=1.0,
                    help="Scale on the U-Net multi-scale mask loss when --with_pose is set.")
     p.add_argument("--pose_weight", type=float, default=1.0,
@@ -213,7 +255,11 @@ def main() -> None:
     # -----------------------------------------------------------------
     # Data
     # -----------------------------------------------------------------
-    ds_full = GateDataset(args.data, augment=True, with_pose=args.with_pose)
+    if args.multi_gate and not args.with_pose:
+        raise SystemExit("--multi_gate requires --with_pose")
+
+    ds_full = GateDataset(args.data, augment=True,
+                          with_pose=args.with_pose, multi_gate=args.multi_gate)
     val_size = int(len(ds_full) * args.val_split)
     train_size = len(ds_full) - val_size
 
@@ -222,7 +268,8 @@ def main() -> None:
         generator=torch.Generator().manual_seed(args.seed),
     )
 
-    ds_val_clean = GateDataset(args.data, augment=False, with_pose=args.with_pose)
+    ds_val_clean = GateDataset(args.data, augment=False,
+                               with_pose=args.with_pose, multi_gate=args.multi_gate)
     ds_val.dataset = ds_val_clean   # type: ignore[attr-defined]
     num_gates = ds_full.num_gates
 
@@ -243,10 +290,11 @@ def main() -> None:
         in_channels=in_channels,
         f=args.f,
         num_gates=num_gates if args.with_pose else 0,
+        multi_gate=args.multi_gate,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"[GateNet] in_channels={in_channels}  n_params={n_params:,}  "
-          f"with_pose={args.with_pose}  num_gates={num_gates}")
+          f"with_pose={args.with_pose}  multi_gate={args.multi_gate}  num_gates={num_gates}")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
 
@@ -274,17 +322,21 @@ def main() -> None:
             if args.with_pose:
                 img = batch["img"].to(device, non_blocking=True)
                 mask = batch["mask"].to(device, non_blocking=True)
-                tidx = batch["target_idx"].to(device, non_blocking=True)
-                oh = _onehot(tidx, num_gates)
-                out = model(img, oh)
-                mask_l, mask_m = gatenet_loss(out["mask_logits"], mask)
                 targets = {
                     "pos_b": batch["pos_b"].to(device),
                     "quat_b": batch["quat_b"].to(device),
                     "pos_w": batch["pos_w"].to(device),
                     "visible": batch["visible"].to(device),
                 }
-                pose_l, pose_m = pose_loss(out, targets)
+                if args.multi_gate:
+                    out = model(img)
+                    pose_l, pose_m = pose_loss_multi(out, targets)
+                else:
+                    tidx = batch["target_idx"].to(device, non_blocking=True)
+                    oh = _onehot(tidx, num_gates)
+                    out = model(img, oh)
+                    pose_l, pose_m = pose_loss(out, targets)
+                mask_l, mask_m = gatenet_loss(out["mask_logits"], mask)
                 loss = args.mask_weight * mask_l + args.pose_weight * pose_l
                 sub_metrics = {f"mask/{k}": v for k, v in mask_m.items()}
                 sub_metrics.update({f"pose/{k}": v for k, v in pose_m.items()})
@@ -310,7 +362,8 @@ def main() -> None:
 
         train_loss = epoch_loss / max(1, n_batches)
 
-        val_metrics = _validate(model, val_loader, device, args.with_pose, num_gates)
+        val_metrics = _validate(model, val_loader, device, args.with_pose, num_gates,
+                                multi_gate=args.multi_gate)
         for k, v in val_metrics.items():
             writer.add_scalar(f"val/{k}", v, step)
         pose_str = ""
@@ -335,6 +388,7 @@ def main() -> None:
             "f": args.f,
             "in_channels": in_channels,
             "with_pose": args.with_pose,
+            "multi_gate": args.multi_gate,
             "num_gates": num_gates if args.with_pose else 0,
         }
         torch.save(ckpt, os.path.join(ckpt_dir, "gatenet_latest.pt"))

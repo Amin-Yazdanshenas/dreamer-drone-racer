@@ -88,13 +88,19 @@ def main() -> None:
 
     images_chunks: list = []
     masks_chunks: list = []
-    # Per-frame extras — only saved when --save_pose is on (default).
+    # Per-frame extras (single-target legacy — kept for backward compatibility):
     target_idx_chunks: list = []
     target_pos_b_chunks: list = []
     target_quat_b_chunks: list = []
     target_pos_w_chunks: list = []
     target_quat_w_chunks: list = []
     target_visible_chunks: list = []
+    # NEW: per-frame per-gate arrays for multi-gate detection training.
+    all_pos_b_chunks: list = []     # (N, G, 3)
+    all_quat_b_chunks: list = []    # (N, G, 4)
+    all_pos_w_chunks: list = []     # (N, G, 3)
+    all_quat_w_chunks: list = []    # (N, G, 4)
+    all_visible_chunks: list = []   # (N, G) uint8
     collected = 0
 
     # We need the gate class-id set, but Isaac Sim populates idToLabels lazily — a gate
@@ -240,6 +246,49 @@ def main() -> None:
         target_quat_w_chunks.append(gate_quat_w.cpu().numpy().astype(np.float32))
         target_visible_chunks.append(visible.cpu().numpy())
 
+        # ---------- Per-gate (multi-gate detection) ground truth ----------
+        # For every gate on the track, compute body-frame pose and per-gate visibility.
+        # Used by the multi-gate output head — network must predict pose for every gate
+        # it sees, not just the target. Shapes: (N_envs, num_gates, ...).
+        N_envs = args_cli.num_envs
+        G = expected_num_gates
+
+        all_pos_w_t = track.data.object_com_pos_w.to(device)         # (N, G, 3)
+        all_quat_w_t = track.data.object_quat_w.to(device)           # (N, G, 4)
+
+        # Body-frame pose: subtract_frame_transforms expects flat (N*G, *) tensors.
+        drone_pos_w_exp = drone_pos_w.unsqueeze(1).expand(-1, G, -1).reshape(-1, 3)
+        drone_quat_w_exp = drone_quat_w.unsqueeze(1).expand(-1, G, -1).reshape(-1, 4)
+        all_pos_w_flat = all_pos_w_t.reshape(-1, 3)
+        all_quat_w_flat = all_quat_w_t.reshape(-1, 4)
+        all_pos_b_flat, _ = math_utils.subtract_frame_transforms(
+            drone_pos_w_exp, drone_quat_w_exp, all_pos_w_flat,
+        )
+        all_pos_b_t = all_pos_b_flat.reshape(N_envs, G, 3)
+
+        drone_quat_inv_exp = math_utils.quat_inv(drone_quat_w).unsqueeze(1)
+        drone_quat_inv_exp = drone_quat_inv_exp.expand(-1, G, -1).reshape(-1, 4)
+        all_quat_b_flat = math_utils.quat_mul(drone_quat_inv_exp, all_quat_w_flat)
+        all_quat_b_t = all_quat_b_flat.reshape(N_envs, G, 4)
+
+        # Per-gate visibility: each gate's class id appears in this env's seg map?
+        # Build (G,) tensor of class IDs (0 when label unknown — gate counted invisible).
+        gate_cls_per_idx = torch.zeros(G, dtype=class_id.dtype, device=class_id.device)
+        for g in range(G):
+            gate_cls_per_idx[g] = name_to_id.get(f"gate_{g + 1}", 0)
+        # Compare seg pixels against each gate's class id, reduce H,W.
+        flat_seg = class_id.reshape(N_envs, -1)                      # (N, H*W)
+        # (N, H*W, 1) == (1, 1, G) → (N, H*W, G) bool → any over pixel axis
+        per_gate_vis = (
+            flat_seg.unsqueeze(-1) == gate_cls_per_idx.view(1, 1, G)
+        ).any(dim=1).to(torch.uint8)                                 # (N, G)
+
+        all_pos_b_chunks.append(all_pos_b_t.cpu().numpy().astype(np.float32))
+        all_quat_b_chunks.append(all_quat_b_t.cpu().numpy().astype(np.float32))
+        all_pos_w_chunks.append(all_pos_w_t.cpu().numpy().astype(np.float32))
+        all_quat_w_chunks.append(all_quat_w_t.cpu().numpy().astype(np.float32))
+        all_visible_chunks.append(per_gate_vis.cpu().numpy())
+
         collected += rgb_u8.shape[0]
 
         if (it + 1) % 50 == 0:
@@ -257,6 +306,12 @@ def main() -> None:
     quat_w_arr = np.concatenate(target_quat_w_chunks, axis=0)[: args_cli.num_steps]
     target_visible_arr = np.concatenate(target_visible_chunks, axis=0)[: args_cli.num_steps]
 
+    all_pos_b_arr = np.concatenate(all_pos_b_chunks, axis=0)[: args_cli.num_steps]
+    all_quat_b_arr = np.concatenate(all_quat_b_chunks, axis=0)[: args_cli.num_steps]
+    all_pos_w_arr = np.concatenate(all_pos_w_chunks, axis=0)[: args_cli.num_steps]
+    all_quat_w_arr = np.concatenate(all_quat_w_chunks, axis=0)[: args_cli.num_steps]
+    all_visible_arr = np.concatenate(all_visible_chunks, axis=0)[: args_cli.num_steps]
+
     # Sanity stats
     gate_pixel_frac = float((masks > 0).mean())
     visible_frac = float((masks.reshape(masks.shape[0], -1) > 0).any(axis=1).mean())
@@ -268,18 +323,31 @@ def main() -> None:
     print(f"[GateNet-collect] pose ranges: "
           f"pos_b min/max={pos_b_arr.min():.2f}/{pos_b_arr.max():.2f}  "
           f"pos_w min/max={pos_w_arr.min():.2f}/{pos_w_arr.max():.2f}")
+    # Per-gate stats
+    per_gate_vis_frac = all_visible_arr.mean(axis=0)   # (G,)
+    avg_n_visible = float(all_visible_arr.sum(axis=1).mean())
+    print(f"[GateNet-collect] per-gate visibility frac: "
+          f"{[float(round(v, 3)) for v in per_gate_vis_frac]}  "
+          f"avg gates in view per frame={avg_n_visible:.2f}")
 
     os.makedirs(os.path.dirname(args_cli.output) or ".", exist_ok=True)
     np.savez_compressed(
         args_cli.output,
         images=images,
         masks=masks,
+        # Single-target legacy (kept for backward compat with old training runs).
         target_idx=target_idx_arr,
         target_pos_b=pos_b_arr,
         target_quat_b=quat_b_arr,
         target_pos_w=pos_w_arr,
         target_quat_w=quat_w_arr,
         target_visible=target_visible_arr,
+        # Multi-gate per-frame arrays: shape (N, G, ...) (or (N, G) for visibility).
+        all_pos_b=all_pos_b_arr,
+        all_quat_b=all_quat_b_arr,
+        all_pos_w=all_pos_w_arr,
+        all_quat_w=all_quat_w_arr,
+        all_visible=all_visible_arr,
         num_gates=np.array([expected_num_gates], dtype=np.int32),
     )
     print(f"[GateNet-collect] saved to {args_cli.output}")

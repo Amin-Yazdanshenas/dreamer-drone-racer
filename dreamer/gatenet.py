@@ -87,9 +87,10 @@ class GateNet(nn.Module):
     """
 
     def __init__(self, in_channels: int = 3, f: int = 1, num_gates: int = 0,
-                 pose_hidden: int = 256):
+                 pose_hidden: int = 256, multi_gate: bool = False):
         super().__init__()
         self.num_gates = num_gates
+        self.multi_gate = multi_gate and num_gates > 0
 
         def c(n: int) -> int:
             return max(1, n // f)
@@ -112,19 +113,28 @@ class GateNet(nn.Module):
         self.outc3 = nn.Conv2d(c(256), 1, kernel_size=1)
         self.outc4 = nn.Conv2d(c(512), 1, kernel_size=1)
 
-        # Optional pose head. Consumes bottleneck feature (pooled) + one-hot
-        # target index → MLP → (pos_b, quat_b, pos_w, visible).
+        # Optional pose head. Two modes:
+        #   - single-gate (multi_gate=False, default): bottleneck feature + one-hot
+        #     target_idx → 4 heads producing pose for THAT gate.
+        #   - multi-gate (multi_gate=True): no conditioning input; 4 heads producing
+        #     pose for ALL num_gates gates simultaneously.
         if num_gates > 0:
             self._pool = nn.AdaptiveAvgPool2d(1)
-            in_dim = c(512) + num_gates
+            in_dim = c(512) if self.multi_gate else c(512) + num_gates
             self.pose_trunk = nn.Sequential(
                 nn.Linear(in_dim, pose_hidden), nn.SiLU(),
                 nn.Linear(pose_hidden, pose_hidden), nn.SiLU(),
             )
-            self.head_pos_b = nn.Linear(pose_hidden, 3)
-            self.head_quat_b = nn.Linear(pose_hidden, 4)
-            self.head_pos_w = nn.Linear(pose_hidden, 3)
-            self.head_visible = nn.Linear(pose_hidden, 1)
+            if self.multi_gate:
+                self.head_pos_b = nn.Linear(pose_hidden, num_gates * 3)
+                self.head_quat_b = nn.Linear(pose_hidden, num_gates * 4)
+                self.head_pos_w = nn.Linear(pose_hidden, num_gates * 3)
+                self.head_visible = nn.Linear(pose_hidden, num_gates)
+            else:
+                self.head_pos_b = nn.Linear(pose_hidden, 3)
+                self.head_quat_b = nn.Linear(pose_hidden, 4)
+                self.head_pos_w = nn.Linear(pose_hidden, 3)
+                self.head_visible = nn.Linear(pose_hidden, 1)
 
         self._init_weights()
 
@@ -162,15 +172,32 @@ class GateNet(nn.Module):
         if self.num_gates == 0:
             return mask_logits
 
+        B = x.shape[0]
+        feat = self._pool(x5).flatten(1)                       # (B, c(512))
+
+        if self.multi_gate:
+            trunk = self.pose_trunk(feat)
+            pos_b = self.head_pos_b(trunk).view(B, self.num_gates, 3)
+            quat_b = self.head_quat_b(trunk).view(B, self.num_gates, 4)
+            quat_b = quat_b / quat_b.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+            pos_w = self.head_pos_w(trunk).view(B, self.num_gates, 3)
+            visible = self.head_visible(trunk)                 # (B, num_gates)
+            return {
+                "mask_logits": mask_logits,
+                "pos_b": pos_b,
+                "quat_b": quat_b,
+                "pos_w": pos_w,
+                "visible": visible,
+            }
+
         if target_idx_onehot is None:
             raise ValueError(
                 "GateNet was constructed with num_gates > 0; pass target_idx_onehot "
                 f"of shape (B, {self.num_gates})."
             )
 
-        feat = self._pool(x5).flatten(1)                       # (B, c(512))
-        feat = torch.cat([feat, target_idx_onehot.float()], dim=-1)
-        trunk = self.pose_trunk(feat)
+        feat_cond = torch.cat([feat, target_idx_onehot.float()], dim=-1)
+        trunk = self.pose_trunk(feat_cond)
         quat = self.head_quat_b(trunk)
         quat = quat / quat.norm(dim=-1, keepdim=True).clamp(min=1e-6)
         return {
@@ -314,5 +341,63 @@ def pose_loss(
         "L_visible": float(L_visible.item()),
         "pose_total": float(total.item()),
         "n_visible": n_visible,
+    }
+    return total, metrics
+
+
+def pose_loss_multi(
+    pred: dict,
+    targets: dict,
+    weights: dict | None = None,
+) -> tuple[torch.Tensor, dict]:
+    """Multi-gate pose loss. Same terms as `pose_loss` but per-gate.
+
+    pred / targets shapes:
+        pos_b   : (B, G, 3)
+        quat_b  : (B, G, 4)
+        pos_w   : (B, G, 3)
+        visible : (B, G)  — float in [0, 1] (target) / logit (pred)
+
+    pos_b / quat_b losses are masked by per-gate visibility — if gate g is not in
+    view for sample b, that entry contributes nothing to the body-frame losses.
+    pos_w and visibility are supervised on every (b, g) cell.
+    """
+    w = {
+        "pos_b": 1.0,
+        "quat_b": 1.0,
+        "pos_w": 0.5,
+        "visible": 0.5,
+    }
+    if weights:
+        w.update(weights)
+
+    vis = targets["visible"].float()                          # (B, G)
+    vis_mask = vis.bool()
+    n_visible = int(vis_mask.sum().item())
+
+    if n_visible > 0:
+        pos_err = (pred["pos_b"] - targets["pos_b"]).pow(2).sum(-1)   # (B, G)
+        L_pos_b = pos_err[vis_mask].mean()
+        # Quaternion geodesic: 1 - |q · q_target|
+        quat_dot = (pred["quat_b"] * targets["quat_b"]).sum(-1).abs()  # (B, G)
+        L_quat_b = (1.0 - quat_dot[vis_mask]).mean()
+    else:
+        L_pos_b = torch.tensor(0.0, device=pred["pos_b"].device)
+        L_quat_b = torch.tensor(0.0, device=pred["quat_b"].device)
+
+    L_pos_w = F.mse_loss(pred["pos_w"], targets["pos_w"])
+    L_visible = F.binary_cross_entropy_with_logits(pred["visible"], vis)
+
+    total = (w["pos_b"] * L_pos_b + w["quat_b"] * L_quat_b
+             + w["pos_w"] * L_pos_w + w["visible"] * L_visible)
+
+    metrics = {
+        "L_pos_b": float(L_pos_b.item()),
+        "L_quat_b": float(L_quat_b.item()),
+        "L_pos_w": float(L_pos_w.item()),
+        "L_visible": float(L_visible.item()),
+        "pose_total": float(total.item()),
+        "n_visible": n_visible,
+        "n_gate_slots": int(vis.numel()),
     }
     return total, metrics
