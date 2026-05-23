@@ -73,29 +73,47 @@ def _quat_rotate_vec(quat_wxyz: np.ndarray, v: np.ndarray) -> np.ndarray:
 def _draw_birdseye(ax, pos_b_gt: np.ndarray, quat_b_gt: np.ndarray,
                    pos_b_pred: np.ndarray, quat_b_pred: np.ndarray,
                    visible: bool, gate_half_width: float = 0.75,
-                   span_m: float = 8.0) -> None:
-    """Top-down (x-y body frame) sketch of drone + GT + predicted gate.
+                   span_m: float = 8.0,
+                   hfov_deg: float = 47.0) -> None:
+    """Top-down (x_b vs y_b body frame) sketch of drone, camera FOV, GT and predicted gate.
 
-    Drone is a small triangle at origin pointing +x_b (forward).
-    Each gate is drawn as a short line segment centred on its predicted body-frame
-    position, perpendicular to its body-frame x-axis (the gate's normal). Green
-    is GT, red is prediction. Square axes; axis range = ±span_m metres.
+    Drone (blue triangle) at origin pointing +x_b (forward). A light grey wedge marks
+    the camera's horizontal field of view — pose predictions outside this wedge are
+    unconstrained because the gate is not visible to the network. GT green / pred red.
+
+    visible: GT visibility of the target gate. When False, both segments are drawn
+    dashed and the title is annotated to indicate the prediction is uninformative.
     """
     # Drone triangle (forward = +x)
     ax.add_patch(mpatches.Polygon(
-        [[0.4, 0.0], [-0.2, 0.25], [-0.2, -0.25]], closed=True, color="blue", alpha=0.7))
+        [[0.4, 0.0], [-0.2, 0.25], [-0.2, -0.25]],
+        closed=True, color="blue", alpha=0.8, zorder=4))
+
+    # Camera FOV wedge (light grey). Centred on +x_b, half-angle = hfov_deg/2.
+    half = 0.5 * np.deg2rad(hfov_deg)
+    ax.add_patch(mpatches.Wedge(
+        center=(0.0, 0.0),
+        r=span_m * 1.5,
+        theta1=-np.rad2deg(half),
+        theta2=+np.rad2deg(half),
+        facecolor="lightgrey", edgecolor="grey", alpha=0.25,
+        zorder=0,
+    ))
+
+    # Dashed when GT says the gate is not visible to the camera — emphasises that
+    # both GT and prediction lie outside the network's input signal.
+    line_style = "--" if not visible else "-"
+    line_width = 2.0 if not visible else 2.6
 
     for pos_b, quat_b, color in (
         (pos_b_gt, quat_b_gt, "green"),
         (pos_b_pred, quat_b_pred, "red"),
     ):
-        # Gate normal in body frame = quat_b ⊗ [1,0,0]; gate plane spans the perpendicular.
-        # Lateral axis (gate y-axis in body frame) ≈ quat_b ⊗ [0,1,0].
         lateral = _quat_rotate_vec(quat_b, np.array([0.0, 1.0, 0.0]))
         end_a = pos_b[:2] + gate_half_width * lateral[:2]
         end_b = pos_b[:2] - gate_half_width * lateral[:2]
         ax.plot([end_a[0], end_b[0]], [end_a[1], end_b[1]],
-                color=color, linewidth=2.5)
+                color=color, linewidth=line_width, linestyle=line_style, zorder=3)
         ax.scatter([pos_b[0]], [pos_b[1]], color=color, s=15, zorder=3)
 
     ax.set_xlim(-span_m, span_m); ax.set_ylim(-span_m, span_m)
@@ -106,7 +124,7 @@ def _draw_birdseye(ax, pos_b_gt: np.ndarray, quat_b_gt: np.ndarray,
     pos_err = float(np.linalg.norm(pos_b_gt - pos_b_pred))
     dot = abs(float((quat_b_gt * quat_b_pred).sum()))
     ang_deg = float(np.rad2deg(2.0 * np.arccos(np.clip(dot, 0.0, 1.0))))
-    vis_str = "vis=Y" if visible else "vis=N"
+    vis_str = "vis=Y" if visible else "vis=N (pred unconstrained)"
     ax.set_title(f"BEV  Δp={pos_err:.2f}m  Δθ={ang_deg:.1f}°  {vis_str}", fontsize=7)
 
 
