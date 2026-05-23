@@ -30,6 +30,11 @@ parser.add_argument("--num_steps", type=int, default=100_000,
 parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--output", type=str, default="data/gatenet/train.npz")
 parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--frame_stack", type=int, default=1,
+                    help="Number of consecutive RGB frames to concatenate along the "
+                         "channel axis at each step (gives the network temporal parallax "
+                         "for better depth/pos_b estimates). 1 = single frame (default), "
+                         "3 = RGB×3 → 9 input channels.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
@@ -102,6 +107,13 @@ def main() -> None:
     all_quat_w_chunks: list = []    # (N, G, 4)
     all_visible_chunks: list = []   # (N, G) uint8
     collected = 0
+
+    # Rolling buffer of last K RGB frames per env. Stored as numpy uint8 to avoid
+    # holding GPU memory between iterations. Padded by duplicating the first frame
+    # so every saved sample has exactly K frames available (no zero-frames at t=0).
+    K = max(1, int(args_cli.frame_stack))
+    prev_frames: list = []  # list of K (N, H, W, 3) uint8 numpy arrays — oldest first
+    print(f"[GateNet-collect] frame_stack K={K}  (effective input channels = {3 * K})")
 
     # We need the gate class-id set, but Isaac Sim populates idToLabels lazily — a gate
     # only appears once it's been rendered in some camera. Pre-warm: step the env with
@@ -187,7 +199,23 @@ def main() -> None:
             # Fallback: no idToLabels available → keep old behaviour but warn loudly.
             gate_mask = (class_id > 0).to(torch.uint8) * 255
 
-        images_chunks.append(rgb_u8.cpu().numpy())
+        rgb_np = rgb_u8.cpu().numpy()           # (N, H, W, 3) uint8
+
+        # Update rolling K-frame buffer. On first iteration, pre-fill with copies of
+        # the current frame so the saved stack always has K frames (no zero frames).
+        if not prev_frames:
+            prev_frames = [rgb_np.copy() for _ in range(K)]
+        else:
+            prev_frames.pop(0)
+            prev_frames.append(rgb_np)
+
+        # Stack oldest → newest along the channel axis. Last 3 channels = current frame.
+        if K == 1:
+            stacked_np = rgb_np
+        else:
+            stacked_np = np.concatenate(prev_frames, axis=-1)   # (N, H, W, 3*K) uint8
+
+        images_chunks.append(stacked_np)
         masks_chunks.append(gate_mask.cpu().numpy())
 
         # --- Per-frame pose labels for the comparative-study regression heads ---
@@ -349,6 +377,7 @@ def main() -> None:
         all_quat_w=all_quat_w_arr,
         all_visible=all_visible_arr,
         num_gates=np.array([expected_num_gates], dtype=np.int32),
+        frame_stack=np.array([K], dtype=np.int32),
     )
     print(f"[GateNet-collect] saved to {args_cli.output}")
 

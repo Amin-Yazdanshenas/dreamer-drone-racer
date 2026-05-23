@@ -191,7 +191,10 @@ def _make_grid_png(out_path: str, rgb: np.ndarray, gt: np.ndarray, pred: np.ndar
         overlay[pr_b] = (200, 0, 0)
         overlay[gt_b & pr_b] = (220, 220, 0)
 
-        axes[i, 0].imshow(rgb[i]); axes[i, 0].set_title(f"RGB (IoU={ious[i]:.2f})", fontsize=8)
+        # When the dataset was collected with --frame_stack > 1 the images are 9-, 12-, …
+        # channel stacks. Show only the LAST (most recent) RGB frame in the visualization.
+        rgb_show = rgb[i, ..., -3:] if rgb.shape[-1] > 3 else rgb[i]
+        axes[i, 0].imshow(rgb_show); axes[i, 0].set_title(f"RGB (IoU={ious[i]:.2f})", fontsize=8)
         axes[i, 1].imshow(gt[i], cmap="gray", vmin=0, vmax=255); axes[i, 1].set_title("GT mask", fontsize=8)
         axes[i, 2].imshow(pred[i], cmap="gray", vmin=0, vmax=255); axes[i, 2].set_title("Pred mask", fontsize=8)
         axes[i, 3].imshow(overlay); axes[i, 3].set_title("Overlay (G=GT R=Pred Y=both)", fontsize=8)
