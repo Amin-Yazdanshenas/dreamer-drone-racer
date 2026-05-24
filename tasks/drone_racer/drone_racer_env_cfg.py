@@ -734,15 +734,6 @@ class DroneRacerEnvCfg_NoCam_Legacy(DroneRacerEnvCfg_NoCam):
     rewards: LegacyRewardsCfg = LegacyRewardsCfg()
     terminations: LegacyTerminationsCfg = LegacyTerminationsCfg()
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        # LegacyCommandsCfg keeps randomise_start=None; in GateTargetingCommand._resample_command
-        # that branch only resets next_gate_idx and does NOT call reset_after_prev_gate, so the
-        # drone never gets a new pose written after a crash. Force the per-reset-gate respawn so
-        # training collisions actually recover.
-        self.commands.target.randomise_start = True
-        self.events.reset_base = None
-
 
 @configclass
 class DroneRacerEnvCfg_NoCam_Legacy_PLAY(DroneRacerEnvCfg_NoCam_PLAY):
@@ -773,12 +764,6 @@ class DroneRacerEnvCfg_NoCam_CTBR_Legacy(DroneRacerEnvCfg_NoCam_CTBR):
     events: LegacyEventCfg = LegacyEventCfg()
     rewards: LegacyRewardsCfg = LegacyRewardsCfg()
     terminations: LegacyTerminationsCfg = LegacyTerminationsCfg()
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        # Same respawn fix as the motor-omega Legacy training cfg.
-        self.commands.target.randomise_start = True
-        self.events.reset_base = None
 
 
 @configclass
