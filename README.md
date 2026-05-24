@@ -100,6 +100,8 @@ Tasks are registered as standard Gym environments. Three distinct RL training ap
 | **Asymmetric AC** (camera) | PPO via skrl | `Isaac-Drone-Racer-v0` / `-Play-v0` | FPV 64×64 grayscale + IMU | Privileged GT critic |
 | **Ground-truth only** | PPO via skrl | `Isaac-Drone-Racer-NoCam-v0` / `-NoCam-Play-v0` | Full GT state | Fastest; no camera |
 | **MonoRace** (compact perception) | PPO via skrl | `Isaac-Drone-Racer-MonoRace-v0` / `-MonoRace-Play-v0` | 9-dim gate geometry + IMU | Inspired by MAVLab 2025 |
+| **CTBR** (no camera) | PPO via skrl | `Isaac-Drone-Racer-NoCam-CTBR-v0` / `-NoCam-CTBR-Play-v0` | Full GT state | Same as NoCam but CTBR action (collective + body rates) |
+| **Legacy** (upstream-tuned baselines) | PPO via skrl | `Isaac-Drone-Racer-NoCam-{Legacy,CTBR-Legacy}-v0` / `-Play-v0` | Full GT state | Pre-Dreamer reward/event config, known to converge — sanity-check baseline |
 | **DreamerV3** (world model) | DreamerV3 | `Isaac-Drone-Racer-Dreamer-{RGB,Mask,RGBMask}-v0` / `-Dreamer-Play-v0` | Raw 64×64 image (RGB / mask / both) | Separate train/eval scripts |
 
 ---
@@ -149,6 +151,47 @@ python3 scripts/rl/play.py --task Isaac-Drone-Racer-MonoRace-Play-v0 --enable_ca
 ```
 
 Checkpoints: `logs/skrl/drone_racer_monorace/`
+
+---
+
+### PPO — CTBR (Collective Thrust + Body Rates)
+
+Same NoCam env as the ground-truth PPO baseline but the action term is `CTBRActionCfg` instead of the motor-omega `ControlActionCfg`. Action layout is `[c, ω_x, ω_y, ω_z]` in `[-1, 1]^4` and a PD rate controller running at 400 Hz converts body-rate setpoints to torques. Gains and limits live in `dreamer/configs/ctbr_gains.yaml`.
+
+```bash
+# Train (with camera disabled — pure GT state)
+python3 scripts/rl/train.py --task Isaac-Drone-Racer-NoCam-CTBR-v0 --headless --num_envs 4096
+
+# Play
+python3 scripts/rl/play.py --task Isaac-Drone-Racer-NoCam-CTBR-Play-v0 --num_envs 1 --enable_cameras
+```
+
+Checkpoints: `logs/skrl/drone_racer_nocam_ctbr/`
+
+---
+
+### PPO — Legacy Baselines (upstream-tuned)
+
+Pre-Dreamer reward / event / termination config that is known to converge with skrl PPO. Useful as a **sanity-check baseline** when newer configs misbehave: if the Legacy task converges but a current task doesn't, the regression is in the new reward/event design, not in env primitives. Two action variants:
+
+| Action | Train task | Play task |
+|--------|-----------|-----------|
+| Motor-omega (`ControlAction`) | `Isaac-Drone-Racer-NoCam-Legacy-v0` | `Isaac-Drone-Racer-NoCam-Legacy-Play-v0` |
+| CTBR (`CTBRAction`) | `Isaac-Drone-Racer-NoCam-CTBR-Legacy-v0` | `Isaac-Drone-Racer-NoCam-CTBR-Legacy-Play-v0` |
+
+```bash
+# CTBR Legacy (recommended baseline)
+python3 scripts/rl/train.py --task Isaac-Drone-Racer-NoCam-CTBR-Legacy-v0 --headless --enable_cameras --num_envs 64
+python3 scripts/rl/play.py  --task Isaac-Drone-Racer-NoCam-CTBR-Legacy-Play-v0 --num_envs 1 --enable_cameras
+
+# Motor-omega Legacy
+python3 scripts/rl/train.py --task Isaac-Drone-Racer-NoCam-Legacy-v0 --headless --enable_cameras --num_envs 64
+python3 scripts/rl/play.py  --task Isaac-Drone-Racer-NoCam-Legacy-Play-v0 --num_envs 1 --enable_cameras
+```
+
+`LegacyCommandsCfg` / `LegacyEventCfg` / `LegacyRewardsCfg` / `LegacyTerminationsCfg` restore the original upstream values: signed progress (asymmetric=False), `+1`/`-1` pass/miss penalty, `-500` terminating reward, `push_robot` domain-randomization event enabled, 20 m flyaway threshold. Both train and play variants force `randomise_start=True` so the drone always respawns at `prev_gate + 1 m` after a crash.
+
+Checkpoints: `logs/skrl/drone_racer_nocam{,_ctbr}_legacy/`
 
 ---
 
