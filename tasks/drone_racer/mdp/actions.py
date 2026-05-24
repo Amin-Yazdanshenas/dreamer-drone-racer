@@ -120,16 +120,19 @@ class ControlAction(ActionTerm):
 
         self._raw_actions[env_ids] = 0.0
         self._processed_actions[env_ids] = 0.0
+        # Zero the wrench buffers too — otherwise apply_actions reuses the previous step's
+        # thrust/moment for one tick after reset (set_forces_and_torques is called BEFORE
+        # the next process_actions writes fresh values), which kicks the drone away from
+        # the freshly-written respawn pose. CTBR is unaffected because its tau is rebuilt
+        # every step from omega_des/omega_cur, both of which are already cleared above.
+        self._thrust[env_ids] = 0.0
+        self._moment[env_ids] = 0.0
         self._elapsed_time[env_ids] = 0.0
 
         self._motor.reset(env_ids)
         self._robot.reset(env_ids)
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
-        # default_root_state = self._robot.data.default_root_state[env_ids]
-        # default_root_state[:, :3] += self._env.scene.env_origins[env_ids]
-        # self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
-        # self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
 
