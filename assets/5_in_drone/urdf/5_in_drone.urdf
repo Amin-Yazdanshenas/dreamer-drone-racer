@@ -29,6 +29,11 @@
         <mesh filename="package://meshes/prop.dae"/>
       </geometry>
     </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.025"/>
+      <inertia ixx="1e-6" ixy="0.0" ixz="0.0" iyy="1e-6" iyz="0.0" izz="2e-6"/>
+    </inertial>
   </link>
 
   <link name="prop2">
@@ -42,6 +47,11 @@
         <mesh filename="package://meshes/prop.dae"/>
       </geometry>
     </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.025"/>
+      <inertia ixx="1e-6" ixy="0.0" ixz="0.0" iyy="1e-6" iyz="0.0" izz="2e-6"/>
+    </inertial>
   </link>
 
   <link name="prop3">
@@ -55,6 +65,11 @@
         <mesh filename="package://meshes/prop.dae"/>
       </geometry>
     </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.025"/>
+      <inertia ixx="1e-6" ixy="0.0" ixz="0.0" iyy="1e-6" iyz="0.0" izz="2e-6"/>
+    </inertial>
   </link>
 
   <link name="prop4">
@@ -68,6 +83,11 @@
         <mesh filename="package://meshes/prop.dae"/>
       </geometry>
     </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.025"/>
+      <inertia ixx="1e-6" ixy="0.0" ixz="0.0" iyy="1e-6" iyz="0.0" izz="2e-6"/>
+    </inertial>
   </link>
 
   <joint name="m1_joint" type="revolute">
