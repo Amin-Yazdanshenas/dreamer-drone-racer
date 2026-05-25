@@ -213,6 +213,13 @@ def main():
     writer = SummaryWriter(log_dir=os.path.join(log_dir, "tensorboard"), flush_secs=30)
     print(f"[DreamerV3] Logging to {log_dir}")
 
+    # Write an initial checkpoint immediately so a future empty checkpoints/ dir can only
+    # mean save_interval-triggered saves never fired (i.e. updates never happened), not that
+    # the save path itself is broken. Cheap sanity probe — file is overwritten by the first
+    # real save_interval-triggered save below.
+    agent.save(os.path.join(ckpt_dir, "agent_init.pt"))
+    print(f"[DreamerV3] Initial checkpoint written to {ckpt_dir}/agent_init.pt", flush=True)
+
     # ----------------------------------------------------------------
     # Training loop
     # ----------------------------------------------------------------
@@ -299,6 +306,18 @@ def main():
         obs = next_obs
         step += env.num_envs
         agent._step = step
+
+        # Replay-side diagnostic: confirms episodes are flushing and the buffer is sampleable.
+        # If `can_sample` stays False after warmup, every agent.update(replay) returns None →
+        # update_count never increments → save_interval never fires → checkpoints/ stays empty.
+        if step % gate_pass_log_every == 0:
+            print(
+                f"[REPLAY] step={step:,}  buffer={len(replay):,}  "
+                f"episodes={replay.num_episodes}  "
+                f"can_sample={replay._can_sample(cfg.batch_size)}  "
+                f"updates={update_count:,}",
+                flush=True,
+            )
 
         # --- Learn ---
         if step >= cfg.warmup_steps and step % (cfg.update_every * env.num_envs) == 0:

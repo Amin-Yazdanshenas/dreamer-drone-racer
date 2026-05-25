@@ -771,10 +771,20 @@ class DreamerV3Agent:
             + self.cfg.loss_scale_repval * repval_loss
         )
 
+        # actor/entropy above is the analytic PRE-tanh Gaussian entropy — it can exceed the
+        # tanh-squashed policy's theoretical max (~2.77 nats for action_dim=4). These two
+        # diagnostics measure the real squashed action distribution: abs_mean shows whether
+        # the actor commits to non-trivial actions, sat_frac measures tanh saturation.
+        with torch.no_grad():
+            action_abs_mean = act_seq.abs().mean()
+            action_sat_frac = (act_seq.abs() > 0.95).float().mean()
+
         metrics = {
             "actor/loss": actor_loss.item(),
             "actor/entropy": entropy.item(),
             "actor/floor_pen": floor_pen.item(),
+            "actor/action_abs_mean": action_abs_mean.item(),
+            "actor/action_sat_frac": action_sat_frac.item(),
             "critic/loss": crit_loss.item(),
             "critic/repval_loss": repval_loss.item(),
             "imag/reward_mean": rewards.mean().item(),
