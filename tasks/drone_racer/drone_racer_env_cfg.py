@@ -52,7 +52,17 @@ class DroneRacerSceneCfg(InteractiveSceneCfg):
     robot: ArticulationCfg = FIVE_IN_DRONE.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
     # sensors
-    collision_sensor: ContactSensorCfg = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", debug_vis=False)
+    # Sim 5.1 ContactSensor returns a phantom force on the robot body at rest. Narrow to /body
+    # (drop props per NVIDIA PhysX guidance — stale data on small high-frequency parts) and
+    # add history/update_period/force_threshold so the buffered net force is comparable across
+    # sub-steps. illegal_contact threshold is also bumped above the residual noise floor.
+    collision_sensor: ContactSensorCfg = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/body",
+        history_length=3,
+        update_period=0.0,
+        force_threshold=10.0,
+        debug_vis=False,
+    )
     imu = ImuCfg(prim_path="{ENV_REGEX_NS}/Robot/body", debug_vis=False)
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/body/camera",
@@ -135,7 +145,7 @@ class EventCfg:
             "pose_range": {
                 "x": (-3.5, -1.5),
                 "y": (-0.5, 0.5),
-                "z": (1.5, 0.5),
+                "z": (0.5, 1.5),
                 "roll": (-0.0, 0.0),
                 "pitch": (-0.0, 0.0),
                 "yaw": (-0.0, 0.0),
@@ -151,18 +161,16 @@ class EventCfg:
         },
     )
 
-    # intervals — push_robot disabled during early training: random forces destabilize the
-    # untrained policy, cascade crashes, and the resulting reset spikes stall the viewport.
-    # Re-enable for domain-randomization once the policy can fly stably.
-    # push_robot = EventTerm(
-    #     func=mdp.apply_external_force_torque,
-    #     mode="interval",
-    #     interval_range_s=(0.0, 0.2),
-    #     params={
-    #         "force_range": (-0.1, 0.1),
-    #         "torque_range": (-0.05, 0.05),
-    #     },
-    # )
+    # intervals — push_robot re-enabled to match upstream PPO domain-randomization.
+    push_robot = EventTerm(
+        func=mdp.apply_external_force_torque,
+        mode="interval",
+        interval_range_s=(0.0, 0.2),
+        params={
+            "force_range": (-0.1, 0.1),
+            "torque_range": (-0.05, 0.05),
+        },
+    )
 
 
 @configclass
@@ -176,6 +184,9 @@ class CommandsCfg:
         record_fpv=False,
         resampling_time_range=(1e9, 1e9),
         debug_vis=False,
+        spawn_lerp_alpha=0.0,
+        spawn_forward_offset=1.0,
+        spawn_forward_velocity=0.0,
     )
 
 
@@ -183,30 +194,21 @@ class CommandsCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
-    # Reward shaping (post-2.8M env-step diagnostic): progress weight=100 BACKFIRED — drone
-    # learned to exploit drift toward target as a steady reward source, treating gate-passing as
-    # too risky for marginal extra reward. Gate pass rate dropped 8× between 2.0M and 2.8M.
-    # Solution: shrink progress shaping and grow the gate spike so gate-passing dominates.
-    # - terminating −2 (unchanged): crash penalty
-    # - ang_vel_l2 disabled (re-enable post-training)
-    # - progress weight 100 → 10: cap accumulated drift reward to ~5 over long episodes
-    # - gate_passed 3000 → 10000: per-pass spike now +100 (10× bigger than max drift reward)
-    # - lookat_next kept small
-    terminating = RewTerm(func=mdp.is_terminated, weight=-2.0)
-    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=0.0)
-    progress = RewTerm(func=mdp.progress, weight=10.0, params={"command_name": "target"})
-    gate_passed = RewTerm(func=mdp.gate_passed, weight=10000.0, params={"command_name": "target"})
-    lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.5, params={"command_name": "target", "std": 0.5})
-    # Dense distance shaping. Widened std (2 → 5) so signal persists at typical inter-gate
-    # distances (5-15 m on this track) instead of vanishing past 3 m. Weight bumped (2 → 20)
-    # so imagined returns over H=15 reach ~3.0 — clears the ReturnEMA scale floor (=0.1 after
-    # the matching change in networks.py) and gives the actor a non-zero policy gradient.
-    # Per-step max contribution ≈ 0.2 reward; gate spike (+100/pass) still 500× larger.
-    near_gate = RewTerm(
-        func=mdp.pos_error_tanh,
+    # Upstream PPO-tuned weights (per HANDOFF_TO_OTHER_REPO.md §6). Dreamer training may need
+    # re-tuning against these magnitudes (gate_passed lowered 25×; terminating widened 250×).
+    terminating = RewTerm(func=mdp.is_terminated, weight=-500.0)
+    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.0001)
+    progress = RewTerm(
+        func=mdp.progress,
         weight=20.0,
-        params={"command_name": "target", "std": 5.0},
+        params={"command_name": "target", "asymmetric": False},
     )
+    gate_passed = RewTerm(
+        func=mdp.gate_passed,
+        weight=400.0,
+        params={"command_name": "target", "penalize_miss": True},
+    )
+    lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.1, params={"command_name": "target", "std": 0.5})
 
 
 @configclass
@@ -214,11 +216,9 @@ class TerminationsCfg:
     """Termination terms for the MDP."""
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    # flyaway distance bumped 20 → 50 m so a single overshoot doesn't immediately terminate.
-    # Cuts reset cascade rate during early training; re-tighten once policy is competent.
-    flyaway = DoneTerm(func=mdp.flyaway, params={"command_name": "target", "distance": 50.0})
+    flyaway = DoneTerm(func=mdp.flyaway, params={"command_name": "target", "distance": 20.0})
     collision = DoneTerm(
-        func=mdp.illegal_contact, params={"sensor_cfg": SceneEntityCfg("collision_sensor"), "threshold": 0.01}
+        func=mdp.illegal_contact, params={"sensor_cfg": SceneEntityCfg("collision_sensor"), "threshold": 10.0}
     )
 
 
@@ -699,7 +699,7 @@ class LegacyTerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     flyaway = DoneTerm(func=mdp.flyaway, params={"command_name": "target", "distance": 20.0})
     collision = DoneTerm(
-        func=mdp.illegal_contact, params={"sensor_cfg": SceneEntityCfg("collision_sensor"), "threshold": 0.01}
+        func=mdp.illegal_contact, params={"sensor_cfg": SceneEntityCfg("collision_sensor"), "threshold": 10.0}
     )
 
 
