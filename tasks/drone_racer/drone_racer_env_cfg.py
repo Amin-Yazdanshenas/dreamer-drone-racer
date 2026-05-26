@@ -206,12 +206,17 @@ class RewardsCfg:
     # too risky for marginal extra reward. Gate pass rate dropped 8× between 2.0M and 2.8M.
     # Solution: shrink progress shaping and grow the gate spike so gate-passing dominates.
     # - terminating −2 (softened crash penalty)
-    # - ang_vel_l2 disabled (re-enable post-training)
+    # - ang_vel_l2 -0.01 (re-enabled): the in-sim CTBR sanity test (scripts/test_ctbr.py) showed
+    #   that any sustained body rate of 2.5 rad/s tilts the drone past 90° within 1 second, so a
+    #   stochastic actor with no attitude-stabilisation signal cannot stay airborne long enough
+    #   to reach a second gate. Per-step penalty ≈ -0.0075 when tumbling at 5 rad/s, ≈ 0 when
+    #   stable — comparable in magnitude to the near_gate dense reward so the actor has a real
+    #   gradient pushing it toward low body rates.
     # - progress weight 10, asymmetric clamp (no negative progress reward)
     # - gate_passed 10000: dt-scales to +100 per pass (10× bigger than max drift reward)
     # - lookat_next kept small
     terminating = RewTerm(func=mdp.is_terminated, weight=-2.0)
-    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=0.0)
+    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.01)
     progress = RewTerm(
         func=mdp.progress,
         weight=10.0,
