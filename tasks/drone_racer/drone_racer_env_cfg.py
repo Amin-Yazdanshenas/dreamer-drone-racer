@@ -223,9 +223,14 @@ class RewardsCfg:
     # mid-training. -0.02 puts the per-episode cost at ~-1.0 (≈30% of reward at +3.3), strong
     # enough to push action_abs_mean down without destabilising the actor's target distribution.
     ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.02)
+    # progress weight bumped 10 -> 50 after the 4.17M-step run showed the drone learning a
+    # passive-hover local minimum: env/episode_length climbed to 421 RL steps (~4.2 s) and
+    # episode_reward reached +9.66, but env/episode_gates stayed at 0 — drone was banking
+    # near_gate dense reward by hovering ~10 m from a gate without ever passing through.
+    # Stronger forward-motion signal so the actor sees an active incentive to close distance.
     progress = RewTerm(
         func=mdp.progress,
-        weight=10.0,
+        weight=50.0,
         params={"command_name": "target", "asymmetric": True},
     )
     gate_passed = RewTerm(
@@ -234,13 +239,15 @@ class RewardsCfg:
         params={"command_name": "target", "penalize_miss": False},
     )
     lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.5, params={"command_name": "target", "std": 0.5})
-    # Dense distance shaping. Widened std (2 → 5) so signal persists at typical inter-gate
-    # distances (5-15 m on this track). Weight 20 so imagined returns over H=15 reach ~3.0,
-    # clearing the ReturnEMA scale floor (=0.1) and giving the actor a non-zero policy gradient.
-    # Per-step max contribution ≈ 0.2 reward; gate spike (+100/pass) still 500× larger.
+    # Dense distance shaping CUT 20 -> 5 to break the passive-hover local minimum.
+    # With weight=20 a drone parked ~10 m from a gate banked ~0.025 reward/step purely from
+    # this term, easily clearing the cost of doing nothing for a 4-second episode. Cutting
+    # 4x makes hovering far from the gate near-zero reward while still leaving meaningful
+    # dense shaping when the drone is close. Per-step max contribution ≈ 0.05 reward;
+    # gate spike (+100/pass) is now 2000x larger.
     near_gate = RewTerm(
         func=mdp.pos_error_tanh,
-        weight=20.0,
+        weight=5.0,
         params={"command_name": "target", "std": 5.0},
     )
 
