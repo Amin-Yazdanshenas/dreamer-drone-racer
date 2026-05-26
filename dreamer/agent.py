@@ -193,6 +193,14 @@ class Actor(nn.Module):
         """
         out = self.net(latent)
         mean, log_std = out.chunk(2, dim=-1)
+        # Squash the network's raw mean through tanh BEFORE adding Gaussian noise.
+        # The previous diagnostic run showed actor/action_sat_frac climbing from 0.06 to
+        # 0.71 over 270k env-steps while actor/entropy stayed near max — the pre-tanh
+        # Gaussian entropy can't see that the *mean* has drifted far outside the unit
+        # interval, so samples land deep in tanh saturation. Clamping the mean to (-1, 1)
+        # caps the pre-tanh sample range at roughly [-1 - 2σ_max, 1 + 2σ_max] for typical
+        # eps draws and keeps tanh in its responsive region.
+        mean = torch.tanh(mean)
         log_std = log_std.clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
         std = log_std.exp()
 
@@ -207,7 +215,12 @@ class Actor(nn.Module):
     def act_deterministic(self, latent: torch.Tensor) -> torch.Tensor:
         out = self.net(latent)
         mean, _ = out.chunk(2, dim=-1)
-        return torch.tanh(mean)
+        # Match the stochastic path: pre-tanh-mean squash followed by the outer tanh.
+        # Functionally tanh(tanh(x)), so the deterministic action stays in (-tanh(1), tanh(1))
+        # ≈ (-0.762, 0.762). Slightly contracted vs. the old `tanh(mean)`, but consistent
+        # with the bound applied at training time so eval doesn't drift outside the
+        # training distribution.
+        return torch.tanh(torch.tanh(mean))
 
 
 class Critic(nn.Module):
