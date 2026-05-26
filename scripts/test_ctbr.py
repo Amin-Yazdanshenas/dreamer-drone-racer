@@ -72,12 +72,15 @@ import tasks  # noqa: F401
 #   action = [c, ωx_norm, ωy_norm, ωz_norm] each in [-1, 1]
 #   c=0  → hover thrust   (after the asymmetric-linear fix in actions.py)
 #   c=+1 → max thrust     c=-1 → 0 thrust
-#   ωx_norm = 1 → max_roll_rate (10 rad/s)
-#   ωy_norm = 1 → max_pitch_rate (10 rad/s)
-#   ωz_norm = 1 → max_yaw_rate (2 rad/s)
+#   ωx_norm = 1 → max_roll_rate  (5 rad/s)
+#   ωy_norm = 1 → max_pitch_rate (5 rad/s)
+#   ωz_norm = 1 → max_yaw_rate   (2 rad/s)
+# Roll / pitch caps were halved from 10 → 5 in dreamer/configs/ctbr_gains.yaml after the
+# 5M-step Dreamer run showed the drone tumbling out in <1 s of every episode. Keep this
+# constant in sync with the yaml when retuning.
 # ---------------------------------------------------------------------------
 
-MAX_RATES = (10.0, 10.0, 2.0)  # roll, pitch, yaw — keep in sync with ctbr_gains.yaml
+MAX_RATES = (5.0, 5.0, 2.0)  # roll, pitch, yaw — keep in sync with ctbr_gains.yaml
 
 
 def make_action(num_envs: int, c: float, ωx_n: float, ωy_n: float, ωz_n: float) -> torch.Tensor:
