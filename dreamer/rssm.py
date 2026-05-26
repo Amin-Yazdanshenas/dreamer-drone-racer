@@ -389,6 +389,20 @@ class RSSM(nn.Module):
     # KL
     # ------------------------------------------------------------------
 
+    def _unimix_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """Apply unimix smoothing to raw logits.
+
+        Mirrors OneHotDist.__init__ so the KL objective and the sampling distribution agree
+        on the same effective categorical. Without this the network samples from the unimixed
+        distribution but the loss pushes raw logits — they target slightly different optima
+        and the unimix floor on each category is silently ignored by the KL term.
+        """
+        probs = torch.softmax(logits.float(), dim=-1)
+        if self.unimix_ratio > 0.0:
+            uniform = torch.full_like(probs, 1.0 / probs.shape[-1])
+            probs = (1.0 - self.unimix_ratio) * probs + self.unimix_ratio * uniform
+        return torch.log(probs.clamp_min(1e-20))
+
     def kl_loss(
         self,
         post_logit: torch.Tensor,
@@ -400,15 +414,23 @@ class RSSM(nn.Module):
         dyn_loss: KL(stop-grad(post) || prior) — trains the prior to match the posterior.
         rep_loss: KL(post || stop-grad(prior)) — trains the posterior to stay close to the prior.
 
+        Both KLs are computed on unimixed logits so they match the categorical distribution
+        the network actually samples from. Upstream NM512/r2dreamer uses raw logits here —
+        we diverge intentionally for sampling/loss consistency, which matches Hafner's
+        original DreamerV3 reference convention.
+
         The clip(min=free) acts as a per-category free-bits floor: when a category's KL is
         already below `free`, the gradient on that category is zeroed (the floor isn't
         backpropagated through torch.clip), preventing the loss from forcing the posterior
         to collapse onto the prior.
         """
+        post_u = self._unimix_logits(post_logit)
+        prior_u = self._unimix_logits(prior_logit)
+
         # Per-category KL between independent categoricals.
         # logits shape: (..., stoch, discrete) — kl_per_cat sums over -1, returning (..., stoch).
-        rep = kl_per_cat(post_logit, prior_logit.detach())
-        dyn = kl_per_cat(post_logit.detach(), prior_logit)
+        rep = kl_per_cat(post_u, prior_u.detach())
+        dyn = kl_per_cat(post_u.detach(), prior_u)
         rep = torch.clip(rep, min=free)
         dyn = torch.clip(dyn, min=free)
         return dyn.sum(-1), rep.sum(-1)

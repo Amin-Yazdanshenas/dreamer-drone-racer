@@ -250,15 +250,23 @@ def main():
         next_obs = env.step(actions.cpu())
 
         # DEBUG: when gate_passed observation is True, log the reward the env returned for that
-        # transition. If reward is NOT ~+30 (the gate_passed RewTerm weight) when gate_passed=True,
-        # the reward pipeline is broken and the +30 isn't reaching replay.
+        # transition AND the post-pass command state so we can verify next_gate_idx advances and
+        # target_pos_b retargets to the next gate. The previous 5M-step run never passed more
+        # than one gate per episode, so this print confirms whether the command pipeline is
+        # actually re-pointing the drone after a successful pass.
         gp = next_obs["gate_passed"]
         if gp.any():
             idx = gp.nonzero(as_tuple=True)[0]
             rew_vals = next_obs["reward"][idx]
+            cmd = env._isaac.command_manager.get_term(env.command_name)
+            next_idx = cmd.next_gate_idx[idx].detach().cpu().tolist()
+            target_pb = next_obs["state"][idx, -3:].detach().cpu().tolist()
             print(
                 f"[GATE-PASS] step={step}  envs={idx.tolist()}  "
                 f"reward={[round(float(v), 3) for v in rew_vals]}  "
+                f"next_gate_idx={next_idx}  "
+                f"target_pos_b={[[round(float(c), 2) for c in row] for row in target_pb]}  "
+                f"episode_gates={[float(ep_gates[i].item()) for i in idx]}  "
                 f"is_last={[bool(next_obs['is_last'][i].item()) for i in idx]}",
                 flush=True,
             )

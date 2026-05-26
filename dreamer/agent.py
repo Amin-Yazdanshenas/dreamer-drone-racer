@@ -689,10 +689,12 @@ class DreamerV3Agent:
         kl_loss_val = self.cfg.beta_dyn * dyn_loss + self.cfg.beta_rep * rep_loss
         # Unclamped diagnostic — total KL without the free-bits floor. If << dyn_loss + rep_loss
         # over many steps, posterior has collapsed onto the prior despite the floor's gradient
-        # mask.
+        # mask. Computed on unimixed logits to match the loss objective.
         with torch.no_grad():
             from .distributions import kl as kl_per_cat
-            kl_unclamped = kl_per_cat(post_logit, prior_logit).sum(-1).mean()
+            post_u = self.rssm._unimix_logits(post_logit)
+            prior_u = self.rssm._unimix_logits(prior_logit)
+            kl_unclamped = kl_per_cat(post_u, prior_u).sum(-1).mean()
 
         embed_flat = embed.reshape(B * T, -1)
         repr_loss = self._repr_loss(latent, embed_flat, data["action"], B, T)
