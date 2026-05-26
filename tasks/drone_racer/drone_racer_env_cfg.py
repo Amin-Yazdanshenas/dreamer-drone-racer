@@ -608,7 +608,12 @@ class DroneRacerEnvCfg_Dreamer(ManagerBasedRLEnvCfg):
 
     def __post_init__(self) -> None:
         self.events.reset_base = None
-        self.commands.target.randomise_start = True
+        # randomise_start=False: deterministic spawn at gate-1 with the curriculum lerp still
+        # active. Makes [GATE-PASS] traces interpretable across episodes — every episode now
+        # starts with the same next_gate_idx=1, so a multi-gate trajectory shows a clean
+        # 1 → 2 → 3 ... advance pattern instead of a random per-episode index. Flip back to
+        # True once the gate-chain pipeline is confirmed and you want full curriculum coverage.
+        self.commands.target.randomise_start = False
         # Both RGB and segmentation must be available for all three obs modes
         self.scene.tiled_camera.data_types = ["rgb", "semantic_segmentation"]
         self.decimation = 4
