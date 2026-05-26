@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .distributions import MultiOneHotDist, TwoHot, kl as kl_loss, symexp, symlog
+from .distributions import TwoHot, symexp, symlog
 from .networks import DroneEncoder, MLP, MLPHead, ReturnEMA
 from .optim import LaProp, clip_grad_agc_
 from .replay_buffer import SequenceReplayBuffer
@@ -46,16 +46,17 @@ class DreamerConfig:
     # RSSM (R2-Dreamer style)
     h_dim: int = 2048             # deter size
     stoch: int = 32               # number of categorical variables
-    discrete: int = 16            # number of classes per categorical
-    hidden: int = 256             # MLP hidden size inside RSSM
+    discrete: int = 32            # number of classes per categorical (upstream R2-Dreamer)
+    hidden: int = 768             # MLP hidden size inside RSSM (upstream R2-Dreamer)
     blocks: int = 8               # block-diagonal blocks for Deter
     obs_layers: int = 1
     img_layers: int = 2
     dyn_layers: int = 1
+    unimix_ratio: float = 0.01    # uniform-mix smoothing in OneHotDist (prevents posterior collapse)
 
-    # World model losses
+    # World model losses — beta_dyn / beta_rep now actually wired (see _world_model_loss).
     kl_free: float = 1.0
-    beta_dyn: float = 1.0
+    beta_dyn: float = 0.5
     beta_rep: float = 0.1
 
     # Actor-critic
@@ -80,6 +81,9 @@ class DreamerConfig:
     loss_scale_decoder: float = 1.0
 
     # Loss scales
+    # NOTE: loss_scale_dyn / loss_scale_rep are kept for back-compat with older YAML files
+    # but are NO LONGER USED by the WM loss. The KL weighting is now done with beta_dyn /
+    # beta_rep on the separately returned dyn / rep losses (faithful R2-Dreamer port).
     loss_scale_dyn: float = 1.0
     loss_scale_rep: float = 0.1
     loss_scale_rew: float = 1.0
@@ -333,6 +337,7 @@ class DreamerV3Agent:
             obs_layers=cfg.obs_layers,
             img_layers=cfg.img_layers,
             dyn_layers=cfg.dyn_layers,
+            unimix_ratio=cfg.unimix_ratio,
         ).to(self.device)
 
         latent_dim = cfg.h_dim + cfg.stoch * cfg.discrete
@@ -484,7 +489,8 @@ class DreamerV3Agent:
     # ------------------------------------------------------------------
 
     def reset_carry(self, num_envs: int) -> None:
-        stoch, deter = self.rssm.initial_state(num_envs, self.device)
+        # stoch shape is (B, stoch, discrete) for the upstream-port RSSM.
+        stoch, deter = self.rssm.initial(num_envs, self.device)
         prev_action = torch.zeros(num_envs, self.cfg.action_dim, device=self.device)
         self._carry = (stoch, deter, prev_action)
 
@@ -507,12 +513,8 @@ class DreamerV3Agent:
 
         stoch, deter, prev_action = self._carry
 
-        # Zero carry for reset envs
-        if is_first is not None:
-            rst = is_first.to(self.device).float().unsqueeze(-1)  # (N, 1)
-            stoch = stoch * (1 - rst)
-            deter = deter * (1 - rst)
-            prev_action = prev_action * (1 - rst)
+        # Note: we don't pre-zero carry here — obs_step's `reset` arg handles per-env
+        # state and action zeroing inside the RSSM (upstream behaviour).
 
         # Preprocess obs
         image = obs["image"].to(self.device).float() / 255.0    # (N, H, W, C)
@@ -525,15 +527,15 @@ class DreamerV3Agent:
         # steps and polluting replay.
         with torch.autocast(device_type=self._amp_device, dtype=self._amp_dtype):
             embed = self.encoder(obs_in)
-            reset_mask = is_first.to(self.device) if is_first is not None else None
-            (_, post_stoch, _, _, new_deter) = self.rssm.obs_step(
+            reset_mask = is_first.to(self.device).bool() if is_first is not None else None
+            post_stoch, new_deter, _ = self.rssm.obs_step(
                 stoch, deter, prev_action, embed, reset=reset_mask,
                 sample=not deterministic,
             )
 
         post_stoch = post_stoch.float()
         new_deter = new_deter.float()
-        latent = torch.cat([new_deter, post_stoch], dim=-1)
+        latent = self.rssm.get_feat(post_stoch, new_deter)
 
         if self._step < self.cfg.warmup_steps:
             # Random action during warmup. Carry the SAME action we return so prev_action in the
@@ -601,7 +603,9 @@ class DreamerV3Agent:
         self._scaler.update()
 
         # -- Actor-critic update (imagination) --
-        init_stoch = post_stoch.detach().reshape(B * T, -1)
+        # post_stoch is (B, T, stoch, discrete); flatten the time/batch axes for parallel
+        # imagination starts. Keep the (stoch, discrete) tail so the RSSM sees real categoricals.
+        init_stoch = post_stoch.detach().reshape(B * T, self.cfg.stoch, self.cfg.discrete)
         init_deter = deters.detach().reshape(B * T, -1)
 
         self.opt_actor.zero_grad(set_to_none=True)
@@ -634,13 +638,16 @@ class DreamerV3Agent:
         }
         embed = self.encoder(obs_enc).reshape(B, T, -1)   # (B, T, embed_dim)
 
-        # Run RSSM observe
-        post_logits, post_stoch, prior_logits, prior_stoch, deters = self.rssm.observe(
+        # Run RSSM observe → (post_stoch (B,T,S,K), deters (B,T,D), post_logit (B,T,S,K))
+        post_stoch, deters, post_logit = self.rssm.observe(
             embed, data["action"], is_first=data["is_first"].bool()
         )
+        # Compute prior logits separately from deter (upstream pattern). The prior MLP
+        # only depends on deter, so this matches the dyn KL definition exactly.
+        _, prior_logit = self.rssm.prior(deters)
 
         # Flatten to (B*T, *) for heads
-        latent = torch.cat([deters, post_stoch], dim=-1).reshape(B * T, -1)
+        latent = self.rssm.get_feat(post_stoch, deters).reshape(B * T, -1)
 
         # Reward prediction (symexp-twohot)
         rew_logits = self.reward_head(latent)             # (B*T, 255)
@@ -653,16 +660,19 @@ class DreamerV3Agent:
         cont_target = (1.0 - data["is_last"].float()).reshape(B * T)
         cont_loss = F.binary_cross_entropy_with_logits(cont_logits, cont_target)
 
-        # KL loss (balanced, with free nats)
-        post_dist = MultiOneHotDist(post_logits.reshape(B * T, self.cfg.stoch, self.cfg.discrete))
-        prior_dist = MultiOneHotDist(prior_logits.reshape(B * T, self.cfg.stoch, self.cfg.discrete))
-        kl = kl_loss(post_dist, prior_dist, free=self.cfg.kl_free, balance=0.8)
-        kl_mean = kl.mean()
-        # Unclamped KL diagnostic: distinguishes "posterior collapsed and z carries no info"
-        # from "posterior diverges from prior but actual KL still under per-cat free floor".
-        # If kl_unclamped << kl_mean over a long horizon, posterior is collapsing.
+        # KL loss — upstream split into separate dyn/rep with per-category free bits.
+        # beta_dyn = KL(stop-grad post || prior) — pulls prior toward posterior.
+        # beta_rep = KL(post || stop-grad prior) — pulls posterior toward prior.
+        dyn_loss_vec, rep_loss_vec = self.rssm.kl_loss(post_logit, prior_logit, free=self.cfg.kl_free)
+        dyn_loss = dyn_loss_vec.mean()
+        rep_loss = rep_loss_vec.mean()
+        kl_loss_val = self.cfg.beta_dyn * dyn_loss + self.cfg.beta_rep * rep_loss
+        # Unclamped diagnostic — total KL without the free-bits floor. If << dyn_loss + rep_loss
+        # over many steps, posterior has collapsed onto the prior despite the floor's gradient
+        # mask.
         with torch.no_grad():
-            kl_unclamped = post_dist.kl(prior_dist).mean()
+            from .distributions import kl as kl_per_cat
+            kl_unclamped = kl_per_cat(post_logit, prior_logit).sum(-1).mean()
 
         embed_flat = embed.reshape(B * T, -1)
         repr_loss = self._repr_loss(latent, embed_flat, data["action"], B, T)
@@ -678,7 +688,7 @@ class DreamerV3Agent:
         total = (
             self.cfg.loss_scale_rew * rew_loss
             + self.cfg.loss_scale_con * cont_loss
-            + self.cfg.loss_scale_dyn * kl_mean
+            + kl_loss_val
             + self.cfg.loss_scale_barlow * repr_loss
             + self.cfg.loss_scale_decoder * decoder_loss
         )
@@ -691,7 +701,9 @@ class DreamerV3Agent:
         metrics = {
             "wm/rew_loss": rew_loss.item(),
             "wm/cont_loss": cont_loss.item(),
-            "wm/kl": kl_mean.item(),
+            "wm/dyn_loss": dyn_loss.item(),
+            "wm/rep_loss": rep_loss.item(),
+            "wm/kl": kl_loss_val.item(),
             "wm/kl_unclamped": kl_unclamped.item(),
             self._repr_loss_metric_key: repr_loss.item(),
             "wm/decoder_loss": decoder_loss.item() if isinstance(decoder_loss, torch.Tensor) else 0.0,
@@ -708,13 +720,14 @@ class DreamerV3Agent:
         H = self.cfg.imag_horizon
         gamma = self.cfg.gamma
 
-        # Imagination rollout
+        # Imagination rollout. stoch_seq shape: (H, B, S, K); deter_seq: (H, B, D).
         stoch_seq, deter_seq, act_seq, ent_seq = self.rssm.imagine(
             self.actor, init_stoch, init_deter, H
-        )  # each: (H, B, *)
+        )
 
-        latent_seq = torch.cat([deter_seq, stoch_seq], dim=-1)  # (H, B, latent_dim)
-        HH, B2, _ = latent_seq.shape
+        HH = stoch_seq.shape[0]
+        B2 = stoch_seq.shape[1]
+        latent_seq = self.rssm.get_feat(stoch_seq, deter_seq)  # (H, B, latent_dim)
         latent_flat = latent_seq.reshape(HH * B2, -1)
 
         # Predicted rewards and continues along imagination
@@ -731,9 +744,10 @@ class DreamerV3Agent:
             # One extra step beyond horizon
             last_stoch = stoch_seq[-1]
             last_deter = deter_seq[-1]
-            last_action, _ = self.actor(torch.cat([last_deter, last_stoch], dim=-1))
-            _, boot_stoch, boot_deter = self.rssm.img_step(last_stoch, last_deter, last_action)
-            boot_latent = torch.cat([boot_deter, boot_stoch], dim=-1)
+            last_feat = self.rssm.get_feat(last_stoch, last_deter)
+            last_action, _ = self.actor(last_feat)
+            boot_stoch, boot_deter = self.rssm.img_step(last_stoch, last_deter, last_action)
+            boot_latent = self.rssm.get_feat(boot_stoch, boot_deter)
             bootstrap = self.target_critic.value(boot_latent)            # (B2,)
 
         vals_with_boot = torch.cat([vals, bootstrap.unsqueeze(0)], dim=0)  # (H+1, B2)

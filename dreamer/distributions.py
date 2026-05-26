@@ -1,11 +1,29 @@
-"""R2-Dreamer distributions — ported from NM512/r2dreamer."""
+"""Distributions — faithful R2-Dreamer port (NM512/r2dreamer).
+
+Key port from local code:
+- OneHotDist accepts unimix_ratio that blends softmax probs with a uniform prior
+  (probs = (1 - r) * softmax(logits) + r / K). This stops categories from sharpening
+  too aggressively early in training, which is what `wm/kl stuck at floor` looks
+  like when posterior collapse hits.
+- rsample() uses straight-through Gumbel-Softmax (`F.gumbel_softmax(hard=True)`)
+  instead of the previous `torch.multinomial` + STE trick.
+- sample() raises NotImplementedError — the upstream code disables non-rsample
+  paths so callers can't accidentally drop gradient.
+- TwoHot is kept compatible with the existing reward / value heads: bins are
+  linear over [-20, 20] and the caller is expected to symlog the target before
+  calling `log_prob`. `mode()` returns the value in symlog-space too; callers
+  symexp it back. This matches how `agent.py:_world_model_loss` already feeds
+  the reward head.
+"""
 
 from __future__ import annotations
+
+from typing import Sequence
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Distribution, OneHotCategorical, constraints
+from torch import distributions as torchd
 
 
 # ---------------------------------------------------------------------------
@@ -17,101 +35,125 @@ def symlog(x: torch.Tensor) -> torch.Tensor:
 
 
 def symexp(x: torch.Tensor) -> torch.Tensor:
-    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1.0)
+    return torch.sign(x) * torch.expm1(torch.abs(x))
 
 
 # ---------------------------------------------------------------------------
-# OneHotDist — straight-through one-hot categorical
+# OneHotDist — categorical with unimix and Gumbel-Softmax straight-through
 # ---------------------------------------------------------------------------
 
-class OneHotDist(OneHotCategorical):
-    """One-hot categorical with straight-through gradient."""
+class OneHotDist(torchd.one_hot_categorical.OneHotCategorical):
+    """One-hot categorical with optional uniform-mix prior and Gumbel-Softmax rsample.
 
-    def __init__(self, logits=None, probs=None):
-        super().__init__(logits=logits, probs=probs)
+    Args:
+        logits: (..., K) raw logits.
+        unimix_ratio: float in [0, 1]. The forward distribution's probs are
+            `(1 - r) * softmax(logits) + r / K`. r=0 reproduces vanilla softmax.
+    """
 
+    def __init__(self, logits: torch.Tensor, unimix_ratio: float = 0.0):
+        probs = F.softmax(logits.float(), dim=-1)
+        if unimix_ratio > 0.0:
+            uniform = torch.full_like(probs, 1.0 / probs.shape[-1])
+            probs = (1.0 - unimix_ratio) * probs + unimix_ratio * uniform
+        # Convert back to logits for the parent class — `log` is safe because
+        # the uniform mix guarantees strictly positive probabilities.
+        super().__init__(logits=torch.log(probs.clamp_min(1e-20)))
+
+    @property
     def mode(self) -> torch.Tensor:
-        _mode = F.one_hot(self.base_dist._categorical.mode, self.event_shape[-1])
-        return _mode.detach() + self.probs - self.probs.detach()
+        idx = torch.argmax(self.logits, dim=-1)
+        oh = F.one_hot(idx, self.logits.shape[-1]).to(self.logits.dtype)
+        return oh.detach() + self.logits - self.logits.detach()
+
+    def rsample(self, sample_shape=torch.Size(), temperature: float = 1.0) -> torch.Tensor:
+        return F.gumbel_softmax(self.logits, tau=temperature, hard=True, dim=-1)
 
     def sample(self, sample_shape=torch.Size()):
-        # straight-through: use one-hot but allow gradient through probs
-        with torch.no_grad():
-            s = super().sample(sample_shape)
-        return s.detach() + self.probs - self.probs.detach()
+        raise NotImplementedError("Use rsample() for the straight-through Gumbel-Softmax path.")
 
 
 # ---------------------------------------------------------------------------
-# MultiOneHotDist — independent OneHotDist per category
+# MultiOneHotDist — product of independent OneHotDists with shared `K`
 # ---------------------------------------------------------------------------
 
 class MultiOneHotDist:
-    """Product of independent OneHotCategoricals.
+    """Independent categoricals over the last two dims.
 
-    logits: (..., num_cats, num_classes)
+    Two construction modes for backwards compatibility:
+
+    1. `MultiOneHotDist(logits)` where logits is (..., S, K). The categoricals
+       all share the same K, so the call collapses to a single Independent(OneHotDist).
+       This is how the local RSSM and reward / value heads use it.
+    2. `MultiOneHotDist(logits, shape=[K1, K2, ...])` where logits is (..., sum(shape)).
+       Faithful-port signature; splits the trailing axis according to `shape` and
+       wraps a OneHotDist per split. Used if you ever need heterogeneous categoricals.
     """
 
-    def __init__(self, logits: torch.Tensor):
-        self.logits = logits
-        self._shape = logits.shape  # (..., num_cats, num_classes)
+    def __init__(
+        self,
+        logits: torch.Tensor,
+        shape: Sequence[int] | None = None,
+        unimix_ratio: float = 0.0,
+    ):
+        self.unimix_ratio = float(unimix_ratio)
+        if shape is None:
+            # logits: (..., S, K). One OneHotDist over the last dim.
+            self._dist = torchd.Independent(OneHotDist(logits, unimix_ratio=self.unimix_ratio), 1)
+            self._split = False
+            self._shape = None
+        else:
+            splits = torch.split(logits, list(shape), dim=-1)
+            self._onehots = [OneHotDist(s, unimix_ratio=self.unimix_ratio) for s in splits]
+            self._dist = None
+            self._split = True
+            self._shape = list(shape)
 
     @property
-    def num_cats(self) -> int:
-        return self._shape[-2]
-
-    @property
-    def num_classes(self) -> int:
-        return self._shape[-1]
-
     def mode(self) -> torch.Tensor:
-        """Returns (..., num_cats * num_classes) one-hot (straight-through)."""
-        probs = torch.softmax(self.logits, dim=-1)
-        idx = self.logits.argmax(dim=-1)  # (..., num_cats)
-        one_hot = F.one_hot(idx, self.num_classes).float()  # (..., num_cats, num_classes)
-        # straight-through
-        one_hot = one_hot.detach() + probs - probs.detach()
-        return one_hot.flatten(-2)  # (..., num_cats * num_classes)
+        if self._split:
+            return torch.cat([d.mode for d in self._onehots], dim=-1)
+        return self._dist.base_dist.mode
 
-    def sample(self) -> torch.Tensor:
-        probs = torch.softmax(self.logits, dim=-1)
-        # torch.multinomial requires float32 — cast under AMP (bf16/fp16) to avoid
-        # "multinomial only supports floating-point dtypes (float32, float64)" error.
-        with torch.no_grad():
-            idx = torch.multinomial(probs.detach().float().flatten(0, -2), 1).squeeze(-1)
-        idx = idx.reshape(self._shape[:-1])
-        one_hot = F.one_hot(idx, self.num_classes).to(probs.dtype)
-        return (one_hot.detach() + probs - probs.detach()).flatten(-2)
+    def rsample(self, sample_shape=torch.Size()) -> torch.Tensor:
+        if self._split:
+            return torch.cat([d.rsample() for d in self._onehots], dim=-1)
+        return self._dist.rsample(sample_shape)
 
-    def log_prob(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (..., num_cats * num_classes)"""
-        x = x.reshape(*x.shape[:-1], self.num_cats, self.num_classes)
-        log_probs = F.log_softmax(self.logits, dim=-1)
-        return (x * log_probs).sum(-1).sum(-1)
+    def sample(self, sample_shape=torch.Size()):
+        raise NotImplementedError("Use rsample() for the straight-through Gumbel-Softmax path.")
+
+    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
+        if self._split:
+            splits = torch.split(value, self._shape, dim=-1)
+            return sum(d.log_prob(s) for d, s in zip(self._onehots, splits))
+        return self._dist.log_prob(value)
 
     def entropy(self) -> torch.Tensor:
-        probs = torch.softmax(self.logits, dim=-1)
-        log_probs = F.log_softmax(self.logits, dim=-1)
-        ent = -(probs * log_probs).sum(-1)  # (..., num_cats)
-        return ent.sum(-1)
+        if self._split:
+            return sum(d.entropy() for d in self._onehots)
+        return self._dist.entropy()
 
     def kl(self, other: "MultiOneHotDist") -> torch.Tensor:
-        """KL(self || other), shape: (...)"""
-        p = torch.softmax(self.logits, dim=-1)
-        log_p = F.log_softmax(self.logits, dim=-1)
-        log_q = F.log_softmax(other.logits, dim=-1)
-        kl_per_cat = (p * (log_p - log_q)).sum(-1)  # (..., num_cats)
-        return kl_per_cat.sum(-1)
+        return kl(self.logits, other.logits).sum(-1)
+
+    @property
+    def logits(self) -> torch.Tensor:
+        if self._split:
+            return torch.cat([d.logits for d in self._onehots], dim=-1)
+        return self._dist.base_dist.logits
 
 
 # ---------------------------------------------------------------------------
-# TwoHot distribution
+# TwoHot — symexp twohot regression head (DreamerV3)
 # ---------------------------------------------------------------------------
 
 class TwoHot:
-    """Symexp-twohot target distribution (R2-Dreamer / DreamerV3 reward head).
+    """Symexp-twohot target distribution (R2-Dreamer / DreamerV3 reward & value heads).
 
-    bins: number of bins (default 255)
-    low, high: range of the symexp-space bins
+    `bins` is a linear lattice in symlog-space (i.e. [-20, 20] by default). Targets
+    passed to `log_prob` are expected to already be in symlog-space; `mode()` returns
+    the symlog-space prediction and the caller symexps to get the raw value.
     """
 
     def __init__(self, logits: torch.Tensor, low: float = -20.0, high: float = 20.0):
@@ -119,8 +161,7 @@ class TwoHot:
         self.bins = logits.shape[-1]
         self.low = low
         self.high = high
-        self._bin_values = torch.linspace(low, high, self.bins, device=logits.device,
-                                          dtype=logits.dtype)
+        self._bin_values = torch.linspace(low, high, self.bins, device=logits.device, dtype=logits.dtype)
 
     def mode(self) -> torch.Tensor:
         probs = torch.softmax(self.logits, dim=-1)
@@ -130,20 +171,16 @@ class TwoHot:
         return self.mode()
 
     def log_prob(self, target: torch.Tensor) -> torch.Tensor:
-        """target: (...) scalar, in symlog space already."""
         target = target.clamp(self.low, self.high)
         bins = self._bin_values
-        # Find lower and upper bin indices
         idx = torch.searchsorted(bins.contiguous(), target.contiguous())
         idx = idx.clamp(1, self.bins - 1)
         lower = idx - 1
         upper = idx
         lo_val = bins[lower]
         hi_val = bins[upper]
-        # Linear interpolation weights
         w_hi = (target - lo_val) / (hi_val - lo_val + 1e-8)
         w_lo = 1.0 - w_hi
-        # Build soft target — use float32 to avoid dtype mismatch under AMP
         target_probs = torch.zeros_like(self.logits, dtype=torch.float32)
         target_probs.scatter_(-1, lower.unsqueeze(-1), w_lo.float().unsqueeze(-1))
         target_probs.scatter_add_(-1, upper.unsqueeze(-1), w_hi.float().unsqueeze(-1))
@@ -156,8 +193,6 @@ class TwoHot:
 # ---------------------------------------------------------------------------
 
 class MSEDist:
-    """Unit-variance Gaussian (MSE loss)."""
-
     def __init__(self, pred: torch.Tensor):
         self.pred = pred
 
@@ -169,8 +204,6 @@ class MSEDist:
 
 
 class SymlogDist:
-    """MSE in symlog space."""
-
     def __init__(self, pred: torch.Tensor, reduce_dims: int = 1):
         self.pred = pred
         self.reduce_dims = reduce_dims
@@ -184,8 +217,6 @@ class SymlogDist:
 
 
 class Bound:
-    """Clamps a base distribution's mode to [-bound, bound]."""
-
     def __init__(self, dist, bound: float):
         self.dist = dist
         self.bound = bound
@@ -201,18 +232,15 @@ class Bound:
 # Functional helpers
 # ---------------------------------------------------------------------------
 
-def bounded_normal(mean: torch.Tensor, std: float = 1.0,
-                   bound: float = 1.0) -> torch.Tensor:
-    """Sample from N(mean, std) and clamp to [-bound, bound]."""
+def bounded_normal(mean: torch.Tensor, std: float = 1.0, bound: float = 1.0) -> torch.Tensor:
     return (mean + std * torch.randn_like(mean)).clamp(-bound, bound)
 
 
-def binary(logits: torch.Tensor) -> torch.distributions.Bernoulli:
+def binary(logits: torch.Tensor):
     return torch.distributions.Bernoulli(logits=logits)
 
 
-def symexp_twohot(logits: torch.Tensor, low: float = -20.0,
-                  high: float = 20.0) -> TwoHot:
+def symexp_twohot(logits: torch.Tensor, low: float = -20.0, high: float = 20.0) -> TwoHot:
     return TwoHot(logits, low=low, high=high)
 
 
@@ -228,30 +256,13 @@ def identity(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
-def kl(post: MultiOneHotDist, prior: MultiOneHotDist,
-        free: float = 0.0, balance: float = 0.8) -> torch.Tensor:
-    """Balanced KL: balance * KL(post_sg || prior) + (1-balance) * KL(post || prior_sg).
+def kl(logits_left: torch.Tensor, logits_right: torch.Tensor) -> torch.Tensor:
+    """Per-category KL between two batches of categorical logits.
 
-    free: free-nats floor applied PER CATEGORY (not per sample total).
-    With stoch=32 cats, free=1.0 gives a 32-nat floor per sample, preventing
-    posterior collapse by ensuring each category contributes at least 1 nat of
-    information. Applying the floor to the total (which was the old behaviour)
-    gave a 32x weaker signal and caused full posterior collapse.
+    Both tensors share the same shape; reduces only the trailing K dim.
+    Returns the per-(...,) KL — caller can `.sum(-1)` over remaining category dims.
     """
-    post_sg_logits = post.logits.detach()
-    prior_sg_logits = prior.logits.detach()
-
-    def _kl_per_cat(lp: torch.Tensor, lq: torch.Tensor) -> torch.Tensor:
-        p = F.softmax(lp, dim=-1)
-        log_p = F.log_softmax(lp, dim=-1)
-        log_q = F.log_softmax(lq, dim=-1)
-        return (p * (log_p - log_q)).sum(-1)  # (..., num_cats)
-
-    dyn_cats = _kl_per_cat(post_sg_logits, prior.logits)          # (..., num_cats)
-    rep_cats = _kl_per_cat(post.logits, prior_sg_logits)          # (..., num_cats)
-
-    if free > 0.0:
-        dyn_cats = dyn_cats.clamp(min=free)
-        rep_cats = rep_cats.clamp(min=free)
-
-    return balance * dyn_cats.sum(-1) + (1 - balance) * rep_cats.sum(-1)
+    log_p = F.log_softmax(logits_left, dim=-1)
+    log_q = F.log_softmax(logits_right, dim=-1)
+    p = torch.softmax(logits_left, dim=-1)
+    return (p * (log_p - log_q)).sum(-1)

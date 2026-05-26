@@ -13,15 +13,19 @@ image_channels: 3       # overridden per obs-mode yaml
 state_dim: 13           # ang_vel(3) + quat(4) + lin_vel(3) + target_pos_b(3)
 action_dim: 4
 
-# ----- RSSM (paper spec: h_dim=2048, hidden=768, stoch=32, discrete=32) -----
+# ----- RSSM (faithful R2-Dreamer port: h_dim=2048, hidden=768, stoch=32, discrete=32) -----
 h_dim: 2048             # deter recurrent state dim
 stoch: 32               # number of categorical variables
-discrete: 32            # classes per categorical (paper=32; was incorrectly 16)
-hidden: 768             # MLP hidden size in RSSM + heads (paper=768; was incorrectly 256)
+discrete: 32            # classes per categorical
+hidden: 768             # MLP hidden size in RSSM + heads
 blocks: 8
 obs_layers: 1
 img_layers: 2
 dyn_layers: 1
+# unimix_ratio blends each categorical's softmax probs with a uniform prior: probs ←
+# (1-r)·softmax + r/K. Stops categories from sharpening too aggressively (which is
+# what posterior collapse looks like in practice).
+unimix_ratio: 0.01
 
 # ----- Encoder -----
 cnn_depth: 48           # base CNN channel count (paper=48)
@@ -31,13 +35,13 @@ mlp_units: 256          # encoder state-MLP units
 # Paper β_pred=3.0 → reward + continue heads weighted 3x to balance against KL/repr.
 loss_scale_rew: 3.0
 loss_scale_con: 3.0
-# IMPORTANT: beta_dyn / beta_rep DATACLASS FIELDS ARE NOT WIRED in agent.py — the WM loss
-# reads loss_scale_dyn only. Earlier YAML used beta_dyn: 0.5, beta_rep: 0.1 expecting it to
-# control the KL split, but the runtime kept the default loss_scale_dyn=1.0 (the value that
-# historically caused posterior collapse @ 358K). Switching to loss_scale_dyn=0.5 so YAML
-# matches actual behaviour. The balanced-KL helper still splits dyn/rep 0.8/0.2 internally;
-# this scale just controls the combined KL weight.
-loss_scale_dyn: 0.5
+# Upstream R2-Dreamer splits the KL into dyn (= KL(stop-grad post || prior), pulls prior
+# toward posterior) and rep (= KL(post || stop-grad prior), pulls posterior toward prior).
+# Both are clipped per-category at kl_free. beta_dyn / beta_rep are now actually wired by
+# agent.py:_world_model_loss. The old loss_scale_dyn knob is dead but kept in DreamerConfig
+# for back-compat with older YAML files.
+beta_dyn: 0.5
+beta_rep: 0.1
 kl_free: 1.0            # per-category free bits — main defence against posterior collapse
 loss_scale_barlow: 0.05
 
