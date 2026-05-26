@@ -42,7 +42,15 @@ loss_scale_con: 3.0
 # for back-compat with older YAML files.
 beta_dyn: 0.5
 beta_rep: 0.1
-kl_free: 1.0            # per-category free bits — main defence against posterior collapse
+# kl_free: per-category free-bits floor on dyn/rep KL. Was 1.0 (DreamerV3-paper default),
+# which with stoch=32 categories pinned total KL at ≥32 nats and zeroed gradient when each
+# category was below 1 nat. On this task that left wm/dyn_loss and wm/rep_loss stuck at
+# 32 through 713k env-steps while wm/kl_unclamped only crept up to ~13 — the WM never
+# got pressure to encode state-conditional posteriors, so the reward head learned an
+# unstructured map and imag/return_mean inflated to +3.3 while real episode_reward stayed
+# at +2.0 (model exploitation). Lowering to 0.1 means the floor only kicks in once a
+# category drops below 0.1 nats, so the WM has real gradient to learn dynamics structure.
+kl_free: 0.1
 loss_scale_barlow: 0.05
 
 # ----- Informed-Dreamer privileged-state decoder (SkyDreamer arXiv 2510.14783) -----
