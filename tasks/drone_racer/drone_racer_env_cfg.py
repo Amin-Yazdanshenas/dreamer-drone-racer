@@ -216,7 +216,12 @@ class RewardsCfg:
     # - gate_passed 10000: dt-scales to +100 per pass (10× bigger than max drift reward)
     # - lookat_next kept small
     terminating = RewTerm(func=mdp.is_terminated, weight=-2.0)
-    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.01)
+    # Bumped 5x from -0.01 after a 446k-step run showed actor/action_abs_mean unchanged at 0.66
+    # despite ang_vel_l2 being enabled. Per-episode cost at -0.01 was only ~15% of total reward
+    # (-0.5 of +3.3), small enough that the actor preferred to keep tumbling for the (inflated)
+    # imagined rewards. -0.05 makes the tumble cost ~75% of episode reward when fully tumbling
+    # at ~3 rad/s for ~185 RL steps — actor must now actively learn low-rate flight.
+    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.05)
     progress = RewTerm(
         func=mdp.progress,
         weight=10.0,
@@ -613,12 +618,12 @@ class DroneRacerEnvCfg_Dreamer(ManagerBasedRLEnvCfg):
 
     def __post_init__(self) -> None:
         self.events.reset_base = None
-        # randomise_start=False: deterministic spawn at gate-1 with the curriculum lerp still
-        # active. Makes [GATE-PASS] traces interpretable across episodes — every episode now
-        # starts with the same next_gate_idx=1, so a multi-gate trajectory shows a clean
-        # 1 → 2 → 3 ... advance pattern instead of a random per-episode index. Flip back to
-        # True once the gate-chain pipeline is confirmed and you want full curriculum coverage.
-        self.commands.target.randomise_start = False
+        # randomise_start=True now that the gate-chain pipeline has been verified end-to-end:
+        # the 446k-step run produced four valid [GATE-PASS] events with next_gate_idx advancing
+        # correctly and reward ≈ +100 each. Switching back to random starting gates gives the
+        # actor coverage across all 7 gate-to-gate transitions on the track instead of only
+        # the gate0→gate1 segment, which it needs to learn full lap navigation.
+        self.commands.target.randomise_start = True
         # Both RGB and segmentation must be available for all three obs modes
         self.scene.tiled_camera.data_types = ["rgb", "semantic_segmentation"]
         self.decimation = 4
