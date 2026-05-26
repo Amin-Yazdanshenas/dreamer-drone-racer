@@ -61,7 +61,13 @@ priv_state_dim: 12
 loss_scale_decoder: 1.0
 
 # ----- Actor-critic -----
-imag_horizon: 15        # imagination rollout length
+# imag_horizon dropped from the DreamerV3 default 15 to 10. The 460k-step run with stronger
+# attitude shaping showed imag/return_mean inflating to +1.44 while real episodes pulled
+# +3.76 -> -2.44 -> +3.76 (highly variable). return/scale tracked the imag inflation to +6.06,
+# which destabilised the actor's normalised targets. Shorter horizon compounds less model error
+# and keeps imag/return closer to realistic episode returns. Can be raised back to 15 once the
+# WM posterior is using more capacity (currently ~2.3 nats out of 32-nat budget).
+imag_horizon: 10
 horizon: 333            # discount horizon → gamma = 1 - 1/333 ≈ 0.997
 lam: 0.95
 entropy_scale: 3.0e-3   # 10x paper: bare 3e-4 collapsed policy in earlier runs

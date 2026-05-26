@@ -216,12 +216,13 @@ class RewardsCfg:
     # - gate_passed 10000: dt-scales to +100 per pass (10× bigger than max drift reward)
     # - lookat_next kept small
     terminating = RewTerm(func=mdp.is_terminated, weight=-2.0)
-    # Bumped 5x from -0.01 after a 446k-step run showed actor/action_abs_mean unchanged at 0.66
-    # despite ang_vel_l2 being enabled. Per-episode cost at -0.01 was only ~15% of total reward
-    # (-0.5 of +3.3), small enough that the actor preferred to keep tumbling for the (inflated)
-    # imagined rewards. -0.05 makes the tumble cost ~75% of episode reward when fully tumbling
-    # at ~3 rad/s for ~185 RL steps — actor must now actively learn low-rate flight.
-    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.05)
+    # Dialled back to -0.02 after the -0.05 run showed catastrophic instability:
+    # episode_length swung 1 -> 340 -> 66 RL steps, episode_reward swung -0.06 -> -2.44 -> +3.76,
+    # return/scale escalated to +6.06 (vs +4.25 at -0.01). The actor briefly mastered a 3.4s
+    # episode but then collapsed -- the penalty was strong enough to invert the value landscape
+    # mid-training. -0.02 puts the per-episode cost at ~-1.0 (≈30% of reward at +3.3), strong
+    # enough to push action_abs_mean down without destabilising the actor's target distribution.
+    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.02)
     progress = RewTerm(
         func=mdp.progress,
         weight=10.0,
