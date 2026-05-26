@@ -91,6 +91,8 @@ n_grad_steps: 8
 replay_capacity: 2000000
 
 # ----- Speed -----
+# compile is currently a dead flag — no torch.compile(...) call wires it in agent.py.
+# Leave true for forward-compatibility but understand it does nothing right now.
 compile: true
 amp_dtype: bfloat16     # bf16 on RTX 4090
 

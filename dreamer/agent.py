@@ -646,18 +646,38 @@ class DreamerV3Agent:
         # only depends on deter, so this matches the dyn KL definition exactly.
         _, prior_logit = self.rssm.prior(deters)
 
-        # Flatten to (B*T, *) for heads
-        latent = self.rssm.get_feat(post_stoch, deters).reshape(B * T, -1)
+        # Flatten to (B*T, *) for heads. KL/repr/decoder use the full latent sequence;
+        # reward + cont use a slice that pairs the *arrival* latent with the transition
+        # that produced it (see next block).
+        latent_seq = self.rssm.get_feat(post_stoch, deters)   # (B, T, latent_dim)
+        latent = latent_seq.reshape(B * T, -1)
 
-        # Reward prediction (symexp-twohot)
-        rew_logits = self.reward_head(latent)             # (B*T, 255)
-        rew_target = symlog(data["reward"].reshape(B * T))
+        # Reward + cont temporal alignment fix.
+        #
+        # Replay stores at index t: (obs_t, action_t, reward_AFTER_action_t, is_last_AFTER_action_t).
+        # RSSM observe shifts actions back so latent_t = posterior(obs_t, prev_action_{t-1})
+        # which represents state s_t. That means reward[t] in storage is the reward of the
+        # transition LEAVING s_t — not the reward ARRIVING AT s_t.
+        #
+        # Imagination, on the other hand, evaluates reward_head on imagined states AFTER
+        # img_step (stoch_seq[k] = s_{k+1}). For the lambda-return at imag step k to receive
+        # the reward of imag step k's transition, reward_head must be trained to predict
+        # "reward arriving at state X" — i.e. latent_{t+1} ↔ reward[t]. Same shift applies
+        # to the continuation head (is_last[t] = "transition leaving s_t terminated" =
+        # "s_{t+1} is the terminal arrival state").
+        #
+        # We drop the first timestep of (latent, reward/cont) pairs because there is no
+        # incoming transition to attribute to s_0.
+        T_eff = T - 1
+        latent_rew = latent_seq[:, 1:].reshape(B * T_eff, -1)
+
+        rew_logits = self.reward_head(latent_rew)
+        rew_target = symlog(data["reward"][:, :-1].reshape(B * T_eff))
         rew_dist = TwoHot(rew_logits)
         rew_loss = -rew_dist.log_prob(rew_target).mean()
 
-        # Continue prediction
-        cont_logits = self.cont_head(latent).squeeze(-1)  # (B*T,)
-        cont_target = (1.0 - data["is_last"].float()).reshape(B * T)
+        cont_logits = self.cont_head(latent_rew).squeeze(-1)
+        cont_target = (1.0 - data["is_last"].float())[:, :-1].reshape(B * T_eff)
         cont_loss = F.binary_cross_entropy_with_logits(cont_logits, cont_target)
 
         # KL loss — upstream split into separate dyn/rep with per-category free bits.
