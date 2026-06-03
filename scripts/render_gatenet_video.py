@@ -76,8 +76,12 @@ def _label(panel: np.ndarray, text: str) -> np.ndarray:
 
 
 def _compose_frame(rgb_u8: np.ndarray, gt_u8: np.ndarray, pred_u8: np.ndarray,
-                   cell: int) -> np.ndarray:
-    """Build a (cell, 3*cell, 3) uint8 frame: [RGB | RGB+GT | RGB+Pred].
+                   cell: int, canvas: tuple[int, int] | None = None) -> np.ndarray:
+    """Build a 3-panel frame: [RGB | RGB+GT | RGB+Pred].
+
+    cell: side length of each square panel before any canvas padding.
+    canvas: optional (W, H) to letterbox/pillarbox the row onto. When None,
+            the frame is exactly (cell, 3·cell, 3).
 
     The collector supports frame stacking (`--frame_stack K` → 3K input channels),
     in which case `rgb_u8` is (H, W, 3K). For display we always show the most
@@ -97,7 +101,26 @@ def _compose_frame(rgb_u8: np.ndarray, gt_u8: np.ndarray, pred_u8: np.ndarray,
     _label(p_gt, "GT mask")
     _label(p_pr, "GateNet pred")
 
-    return np.concatenate([p_rgb, p_gt, p_pr], axis=1)
+    row = np.concatenate([p_rgb, p_gt, p_pr], axis=1)   # (cell, 3*cell, 3)
+
+    if canvas is None:
+        return row
+
+    cw, ch = canvas
+    out = np.zeros((ch, cw, 3), dtype=np.uint8)
+    # Centre the row on a black canvas. If the row is larger than the canvas
+    # in either axis, scale down preserving aspect ratio.
+    rh, rw = row.shape[:2]
+    if rw > cw or rh > ch:
+        scale = min(cw / rw, ch / rh)
+        new_w = int(round(rw * scale))
+        new_h = int(round(rh * scale))
+        row = cv2.resize(row, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        rh, rw = row.shape[:2]
+    y0 = (ch - rh) // 2
+    x0 = (cw - rw) // 2
+    out[y0:y0 + rh, x0:x0 + rw] = row
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +137,12 @@ def main() -> None:
                     help="First sample index in the .npz to render.")
     ap.add_argument("--cell", type=int, default=256,
                     help="Upscaled cell size for each panel (square).")
+    ap.add_argument("--canvas", type=str, default=None,
+                    help="Output canvas size 'WxH' (e.g. 1920x1080). The 3-panel row "
+                         "is letterboxed centred onto this. Skip to keep raw row size.")
+    ap.add_argument("--youtube", action="store_true",
+                    help="Preset for 1080p YouTube upload: cell=640, canvas=1920x1080. "
+                         "Overrides --cell and --canvas if those weren't explicitly set.")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--threshold", type=float, default=0.5,
                     help="Sigmoid threshold for binary mask prediction.")
@@ -128,6 +157,21 @@ def main() -> None:
                          "(needs ffmpeg installed) which always produces a playable mp4.")
     ap.add_argument("--device", type=str, default="cuda")
     args = ap.parse_args()
+
+    # Apply --youtube preset before reading cell/canvas downstream.
+    if args.youtube:
+        if args.cell == 256:        # untouched default
+            args.cell = 640
+        if args.canvas is None:
+            args.canvas = "1920x1080"
+
+    canvas_wh: tuple[int, int] | None = None
+    if args.canvas:
+        try:
+            cw, ch = (int(s) for s in args.canvas.lower().split("x"))
+        except ValueError as exc:
+            raise SystemExit(f"--canvas expects WxH (e.g. 1920x1080), got {args.canvas!r}") from exc
+        canvas_wh = (cw, ch)
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"[render_gatenet_video] device={device}")
@@ -178,15 +222,19 @@ def main() -> None:
 
     # Write mp4 -------------------------------------------------------------
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-    frame_h = args.cell
-    frame_w = args.cell * 3
+    if canvas_wh is not None:
+        frame_w, frame_h = canvas_wh
+    else:
+        frame_h = args.cell
+        frame_w = args.cell * 3
 
     if args.codec == "ffmpeg":
         _write_with_ffmpeg(args.output, args.fps, frame_w, frame_h, idx_range,
-                           images, masks, preds, cell=args.cell)
+                           images, masks, preds, cell=args.cell, canvas=canvas_wh)
     else:
         _write_with_opencv(args.output, args.fps, frame_w, frame_h, args.codec,
-                           idx_range, images, masks, preds, cell=args.cell)
+                           idx_range, images, masks, preds, cell=args.cell,
+                           canvas=canvas_wh)
 
     size_mb = os.path.getsize(args.output) / (1024 * 1024)
     print(f"[render_gatenet_video] wrote {args.output}  ({len(idx_range)} frames, "
@@ -198,7 +246,8 @@ def main() -> None:
 # ---------------------------------------------------------------------------
 
 def _write_with_opencv(path: str, fps: int, w: int, h: int, codec: str,
-                       idx_range, images, masks, preds, cell: int) -> None:
+                       idx_range, images, masks, preds, cell: int,
+                       canvas: tuple[int, int] | None) -> None:
     fourcc = cv2.VideoWriter_fourcc(*codec)
     writer = cv2.VideoWriter(path, fourcc, fps, (w, h))
     if not writer.isOpened():
@@ -207,13 +256,15 @@ def _write_with_opencv(path: str, fps: int, w: int, h: int, codec: str,
             f"Try --codec ffmpeg (requires /usr/bin/ffmpeg)."
         )
     for k, src_idx in enumerate(idx_range):
-        frame = _compose_frame(images[src_idx], masks[src_idx], preds[k], cell=cell)
+        frame = _compose_frame(images[src_idx], masks[src_idx], preds[k],
+                               cell=cell, canvas=canvas)
         writer.write(frame)
     writer.release()
 
 
 def _write_with_ffmpeg(path: str, fps: int, w: int, h: int,
-                       idx_range, images, masks, preds, cell: int) -> None:
+                       idx_range, images, masks, preds, cell: int,
+                       canvas: tuple[int, int] | None) -> None:
     """Pipe raw BGR frames into ffmpeg → libx264 mp4. Plays everywhere."""
     import subprocess
     import shutil
@@ -237,7 +288,8 @@ def _write_with_ffmpeg(path: str, fps: int, w: int, h: int,
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     assert proc.stdin is not None
     for k, src_idx in enumerate(idx_range):
-        frame = _compose_frame(images[src_idx], masks[src_idx], preds[k], cell=cell)
+        frame = _compose_frame(images[src_idx], masks[src_idx], preds[k],
+                               cell=cell, canvas=canvas)
         proc.stdin.write(frame.tobytes())
     proc.stdin.close()
     rc = proc.wait()
