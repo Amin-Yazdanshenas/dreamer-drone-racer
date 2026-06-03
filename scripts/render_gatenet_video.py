@@ -77,7 +77,15 @@ def _label(panel: np.ndarray, text: str) -> np.ndarray:
 
 def _compose_frame(rgb_u8: np.ndarray, gt_u8: np.ndarray, pred_u8: np.ndarray,
                    cell: int) -> np.ndarray:
-    """Build a (cell, 3*cell, 3) uint8 frame: [RGB | RGB+GT | RGB+Pred]."""
+    """Build a (cell, 3*cell, 3) uint8 frame: [RGB | RGB+GT | RGB+Pred].
+
+    The collector supports frame stacking (`--frame_stack K` → 3K input channels),
+    in which case `rgb_u8` is (H, W, 3K). For display we always show the most
+    recent frame, which sits in the last 3 channels (channel order: oldest..newest).
+    """
+    if rgb_u8.shape[-1] != 3:
+        # Frame-stacked input — keep only the latest frame for visualization.
+        rgb_u8 = rgb_u8[..., -3:]
     # cv2 expects BGR. Stored RGB → swap once here.
     rgb_bgr = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2BGR)
 
