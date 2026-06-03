@@ -120,6 +120,12 @@ def main() -> None:
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--output", type=str, required=True,
                     help="Output .mp4 path. Parent dir created if missing.")
+    ap.add_argument("--codec", type=str, default="avc1",
+                    choices=["avc1", "mp4v", "XVID", "MJPG", "ffmpeg"],
+                    help="FourCC codec. 'avc1' = H.264 (default, plays in most apps). "
+                         "'mp4v' is the OpenCV default but isn't recognised by some "
+                         "media players. 'ffmpeg' shells out to /usr/bin/ffmpeg "
+                         "(needs ffmpeg installed) which always produces a playable mp4.")
     ap.add_argument("--device", type=str, default="cuda")
     args = ap.parse_args()
 
@@ -174,22 +180,69 @@ def main() -> None:
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     frame_h = args.cell
     frame_w = args.cell * 3
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(args.output, fourcc, args.fps, (frame_w, frame_h))
-    if not writer.isOpened():
-        raise RuntimeError(f"cv2.VideoWriter failed to open {args.output}")
 
-    for k, src_idx in enumerate(idx_range):
-        rgb_u8 = images[src_idx]
-        gt_u8 = masks[src_idx]
-        pr_u8 = preds[k]
-        frame = _compose_frame(rgb_u8, gt_u8, pr_u8, cell=args.cell)
-        writer.write(frame)
-    writer.release()
+    if args.codec == "ffmpeg":
+        _write_with_ffmpeg(args.output, args.fps, frame_w, frame_h, idx_range,
+                           images, masks, preds, cell=args.cell)
+    else:
+        _write_with_opencv(args.output, args.fps, frame_w, frame_h, args.codec,
+                           idx_range, images, masks, preds, cell=args.cell)
 
     size_mb = os.path.getsize(args.output) / (1024 * 1024)
     print(f"[render_gatenet_video] wrote {args.output}  ({len(idx_range)} frames, "
           f"{frame_w}x{frame_h} @ {args.fps} fps, {size_mb:.1f} MB)")
+
+
+# ---------------------------------------------------------------------------
+# Writer backends
+# ---------------------------------------------------------------------------
+
+def _write_with_opencv(path: str, fps: int, w: int, h: int, codec: str,
+                       idx_range, images, masks, preds, cell: int) -> None:
+    fourcc = cv2.VideoWriter_fourcc(*codec)
+    writer = cv2.VideoWriter(path, fourcc, fps, (w, h))
+    if not writer.isOpened():
+        raise RuntimeError(
+            f"cv2.VideoWriter failed to open {path} with codec '{codec}'. "
+            f"Try --codec ffmpeg (requires /usr/bin/ffmpeg)."
+        )
+    for k, src_idx in enumerate(idx_range):
+        frame = _compose_frame(images[src_idx], masks[src_idx], preds[k], cell=cell)
+        writer.write(frame)
+    writer.release()
+
+
+def _write_with_ffmpeg(path: str, fps: int, w: int, h: int,
+                       idx_range, images, masks, preds, cell: int) -> None:
+    """Pipe raw BGR frames into ffmpeg → libx264 mp4. Plays everywhere."""
+    import subprocess
+    import shutil
+
+    ffmpeg = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+    cmd = [
+        ffmpeg, "-y",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-s", f"{w}x{h}",
+        "-pix_fmt", "bgr24",
+        "-r", str(fps),
+        "-i", "-",
+        "-an",
+        "-vcodec", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-crf", "18",
+        "-preset", "medium",
+        path,
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    assert proc.stdin is not None
+    for k, src_idx in enumerate(idx_range):
+        frame = _compose_frame(images[src_idx], masks[src_idx], preds[k], cell=cell)
+        proc.stdin.write(frame.tobytes())
+    proc.stdin.close()
+    rc = proc.wait()
+    if rc != 0:
+        raise RuntimeError(f"ffmpeg exited {rc} while writing {path}")
 
 
 if __name__ == "__main__":
