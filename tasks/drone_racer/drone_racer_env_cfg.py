@@ -239,16 +239,23 @@ class RewardsCfg:
         params={"command_name": "target", "penalize_miss": False},
     )
     lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.5, params={"command_name": "target", "std": 0.5})
-    # Dense distance shaping CUT 20 -> 5 to break the passive-hover local minimum.
-    # With weight=20 a drone parked ~10 m from a gate banked ~0.025 reward/step purely from
-    # this term, easily clearing the cost of doing nothing for a 4-second episode. Cutting
-    # 4x makes hovering far from the gate near-zero reward while still leaving meaningful
-    # dense shaping when the drone is close. Per-step max contribution ≈ 0.05 reward;
-    # gate spike (+100/pass) is now 2000x larger.
+    # Dense distance shaping RESHAPED: weight 5 -> 25, std 5.0 -> 1.5. After the C1/A1/A4/A5
+    # correctness fixes the value function was verified self-consistent (|return-value| gap
+    # ~0.018) yet the drone still parked near a gate without passing — a reward-shape local
+    # optimum, not a bug. The old wide std=5 paid a salary far from the gate (at 10 m,
+    # weight*(1-tanh(10/5)) = 5*0.036 = 0.18/step) that rewarded hovering; and the shallow
+    # tanh gave almost no gradient pulling the drone the last few metres INTO the gate.
+    #
+    # pos_error_tanh = weight * (1 - tanh(dist/std)). With std=1.5 the reward is ~0 beyond
+    # ~5 m (at 10 m: 25*(1-tanh(6.7)) ≈ 0.00006/step — no hover salary) and climbs STEEPLY in
+    # the final approach (at 1.5 m: 25*(1-tanh(1)) = 11.5; at 0.75 m / gate-edge: 25*(1-tanh(0.5))
+    # = 13.5; at centre: 25). So "the closer it gets, the greater the reward", with the strongest
+    # pull exactly across the gate plane — the drone is dragged through the centre rather than
+    # rewarded for loitering nearby. The gate_passed +100 spike then rewards completing the pass.
     near_gate = RewTerm(
         func=mdp.pos_error_tanh,
-        weight=5.0,
-        params={"command_name": "target", "std": 5.0},
+        weight=25.0,
+        params={"command_name": "target", "std": 1.5},
     )
 
 
@@ -632,6 +639,13 @@ class DroneRacerEnvCfg_Dreamer(ManagerBasedRLEnvCfg):
         # actor coverage across all 7 gate-to-gate transitions on the track instead of only
         # the gate0→gate1 segment, which it needs to learn full lap navigation.
         self.commands.target.randomise_start = True
+        # Curriculum: spawn 60% of the way from the previous gate toward the NEXT gate
+        # (spawn_lerp_alpha 0.3 -> 0.6). After the correctness fixes the drone flies stably but
+        # never discovers a gate pass from a far spawn — passing is too rare for exploration to
+        # find. Spawning close to the target makes the first pass easy to stumble into, so the
+        # gate_passed +100 spike actually enters the returns and the actor can learn it. Anneal
+        # back toward 0.3 once gate_pass_rate is consistently > ~5% (drop in a later run).
+        self.commands.target.spawn_lerp_alpha = 0.6
         # Both RGB and segmentation must be available for all three obs modes
         self.scene.tiled_camera.data_types = ["rgb", "semantic_segmentation"]
         self.decimation = 4
