@@ -246,16 +246,20 @@ class RewardsCfg:
     # weight*(1-tanh(10/5)) = 5*0.036 = 0.18/step) that rewarded hovering; and the shallow
     # tanh gave almost no gradient pulling the drone the last few metres INTO the gate.
     #
-    # pos_error_tanh = weight * (1 - tanh(dist/std)). With std=1.5 the reward is ~0 beyond
-    # ~5 m (at 10 m: 25*(1-tanh(6.7)) ≈ 0.00006/step — no hover salary) and climbs STEEPLY in
-    # the final approach (at 1.5 m: 25*(1-tanh(1)) = 11.5; at 0.75 m / gate-edge: 25*(1-tanh(0.5))
-    # = 13.5; at centre: 25). So "the closer it gets, the greater the reward", with the strongest
-    # pull exactly across the gate plane — the drone is dragged through the centre rather than
-    # rewarded for loitering nearby. The gate_passed +100 spike then rewards completing the pass.
+    # pos_error_tanh = weight * (1 - tanh(dist/std)). std 1.5 -> 3.0: the first reshaped run
+    # (245k steps) went REWARD-NEGATIVE and never learned to pass — std=1.5 was too steep for the
+    # spawn distance. At spawn_lerp_alpha=0.6 the drone starts ~40% of the segment from the
+    # target (~4 m on a 10 m segment), where std=1.5 gives only 25*(1-tanh(4/1.5))=0.22/step — a
+    # reward desert exactly where the episode begins, so the actor saw ~flat-zero shaping plus
+    # the ang_vel/crash penalties and drifted. std=3.0 restores a real gradient across the spawn
+    # range while keeping a steep centre pull and negligible far-field salary:
+    #   8 m: 25*(1-tanh(2.67)) = 0.22   4 m (spawn): 3.3   1.5 m: 13.5   0.75 m: 16.7   centre: 25
+    # So the drone gets signal from the moment it spawns and is pulled smoothly through the gate
+    # centre; the gate_passed +100 spike rewards completing the pass.
     near_gate = RewTerm(
         func=mdp.pos_error_tanh,
         weight=25.0,
-        params={"command_name": "target", "std": 1.5},
+        params={"command_name": "target", "std": 3.0},
     )
 
 
