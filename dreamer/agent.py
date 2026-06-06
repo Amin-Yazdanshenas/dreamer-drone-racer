@@ -4,12 +4,12 @@ Replaces the old buggy custom DreamerV3 with R2-Dreamer's:
 - BlockLinear RSSM
 - Barlow Twins auxiliary loss instead of image decoder
 - LaProp optimizer + AGC gradient clipping
-- float16 AMP + GradScaler
-- repval loss
+- bfloat16 AMP (no GradScaler; GradScaler only enabled when amp_dtype == "float16")
 """
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -66,7 +66,11 @@ class DreamerConfig:
     entropy_scale: float = 3e-4
     entropy_min: float = 1.0       # floor: add penalty when H[π] drops below this
     entropy_floor_weight: float = 1e-2  # weight on F.relu(entropy_min - entropy) floor penalty
-    slow_target_fraction: float = 0.02
+    slow_target_fraction: float = 0.02  # Polyak rate for the target critic (agent.py _soft_update)
+    # ReturnEMA percentile-normaliser decay. Decoupled from slow_target_fraction so the value
+    # normaliser and the target-critic lag can be tuned independently (review:
+    # shared-ema-rate). Default 0.02 preserves prior behaviour (they were the same value).
+    return_ema_alpha: float = 0.02
 
     # Barlow Twins
     barlow_lambd: float = 5e-4
@@ -90,7 +94,10 @@ class DreamerConfig:
     loss_scale_con: float = 1.0
     loss_scale_policy: float = 1.0
     loss_scale_value: float = 1.0
-    loss_scale_repval: float = 0.3
+    # repval (slow-critic self-distillation) disabled by default — it regressed the online
+    # critic onto the same target_critic used for bootstrapping, a redundant contraction toward
+    # the lagged estimate (review A2). Set >0 only with a SEPARATE slow critic.
+    loss_scale_repval: float = 0.0
 
     # NE-Dreamer (ignored by DreamerV3Agent / R2-Dreamer)
     ne_hidden_dim: int = 256
@@ -127,8 +134,8 @@ class DreamerConfig:
     replay_capacity: int = 2_000_000
 
     # Speed
-    compile: bool = True
-    amp_dtype: str = "float16"
+    compile: bool = True          # currently a no-op flag (no torch.compile call wires it)
+    amp_dtype: str = "bfloat16"   # bf16 on RTX 4090; GradScaler auto-disabled for non-fp16
 
     # Logging
     log_interval: int = 50
@@ -165,12 +172,13 @@ class Actor(nn.Module):
     """Squashed-Gaussian actor over imagined latent states."""
 
     LOG_STD_MIN = -5.0
-    # Was 2.0 → std max = exp(2) = 7.4, far wider than the tanh squashing range. Pre-tanh
-    # samples landed in [-15, +15], tanh saturated to ±1, and `_tanh_log_det → log(1e-6) = -13`
-    # per saturated dim inflated reported entropy to ~13 nats (true tanh-squashed entropy ≤ 2.77
-    # for action_dim=4). entropy_scale * inflated_entropy then REWARDED saturation — self-
-    # reinforcing flyaway. LOG_STD_MAX=0 caps std at 1.0 → pre-tanh stays in N(mean, 1), tanh
-    # rarely saturates, entropy stays in physical range.
+    # LOG_STD_MAX=0 caps std at exp(0)=1.0 so the pre-tanh sample stays ~N(mean, 1). The
+    # previous code ALSO squashed the mean (mean = tanh(mean)) to fight saturation, but that
+    # capped the achievable action to ~(-tanh(1), tanh(1)) ≈ ±0.76 — a silent ~24% loss of
+    # CTBR authority on BOTH the eval policy and the on-policy collection policy (review A5 /
+    # no-grad-act). The real defence against mean-driven saturation belongs in the entropy
+    # term (see forward()): the tanh log-Jacobian makes the entropy SEE saturation and penalise
+    # it, so the mean no longer needs a hard squash and can command full authority.
     LOG_STD_MAX = 0.0
 
     def __init__(self, latent_dim: int, action_dim: int, units: int = 256,
@@ -185,22 +193,18 @@ class Actor(nn.Module):
     def forward(self, latent: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Returns (action, entropy).
 
-        entropy: analytic differential entropy of the *pre-tanh* Gaussian, summed
-        across action dim, shape (B,). SAC-style regularizer — closed form, no
-        MC variance, bounded since log_std is clamped. Replaces the old one-sample
-        log-prob estimate `H ≈ -log_prob(sampled_action)` which had high variance
-        AND was unbounded below when tanh saturated (log(1 - y^2) → -inf).
+        entropy: differential entropy of the SQUASHED (tanh) policy, summed across the
+        action dim, shape (B,). It is the pre-tanh Gaussian entropy MINUS the tanh
+        log-Jacobian sum_i log(1 - tanh(pre_tanh_i)^2). The Jacobian term is what makes
+        the entropy see mean-driven saturation: as |pre_tanh| grows the term → -inf, so a
+        policy that drives the mean to the tanh edges (deterministic bang-bang) reports LOW
+        entropy and is penalised by entropy_scale / entropy_floor. The earlier closed-form
+        pre-tanh-only entropy was blind to this (review A4) — it depended on log_std alone,
+        so the actor saturated the mean while reporting near-max entropy. This is now a
+        one-sample MC estimate at the drawn pre_tanh (bounded in practice since std ≤ 1).
         """
         out = self.net(latent)
         mean, log_std = out.chunk(2, dim=-1)
-        # Squash the network's raw mean through tanh BEFORE adding Gaussian noise.
-        # The previous diagnostic run showed actor/action_sat_frac climbing from 0.06 to
-        # 0.71 over 270k env-steps while actor/entropy stayed near max — the pre-tanh
-        # Gaussian entropy can't see that the *mean* has drifted far outside the unit
-        # interval, so samples land deep in tanh saturation. Clamping the mean to (-1, 1)
-        # caps the pre-tanh sample range at roughly [-1 - 2σ_max, 1 + 2σ_max] for typical
-        # eps draws and keeps tanh in its responsive region.
-        mean = torch.tanh(mean)
         log_std = log_std.clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
         std = log_std.exp()
 
@@ -208,19 +212,20 @@ class Actor(nn.Module):
         pre_tanh = mean + std * eps
         action = torch.tanh(pre_tanh)
 
-        # H[N(mean, std)] = sum_i (log std_i + 0.5 * (1 + log 2π))
-        entropy = log_std.sum(-1) + self._GAUSSIAN_ENT_CONST * mean.shape[-1]
+        # Pre-tanh Gaussian entropy: sum_i (log std_i) + 0.5*(1+log 2π)*action_dim
+        gauss_ent = log_std.sum(-1) + self._GAUSSIAN_ENT_CONST * mean.shape[-1]
+        # tanh log-Jacobian: sum_i log(1 - tanh(pre_tanh_i)^2), numerically stable form
+        # log(1 - tanh^2 x) = 2*(log2 - x - softplus(-2x)).
+        log_det = (2.0 * (math.log(2.0) - pre_tanh - F.softplus(-2.0 * pre_tanh))).sum(-1)
+        entropy = gauss_ent + log_det
         return action, entropy
 
     def act_deterministic(self, latent: torch.Tensor) -> torch.Tensor:
         out = self.net(latent)
         mean, _ = out.chunk(2, dim=-1)
-        # Match the stochastic path: pre-tanh-mean squash followed by the outer tanh.
-        # Functionally tanh(tanh(x)), so the deterministic action stays in (-tanh(1), tanh(1))
-        # ≈ (-0.762, 0.762). Slightly contracted vs. the old `tanh(mean)`, but consistent
-        # with the bound applied at training time so eval doesn't drift outside the
-        # training distribution.
-        return torch.tanh(torch.tanh(mean))
+        # Mode of the squashed Gaussian = tanh(mean). Matches the stochastic path's noise-free
+        # action and can reach full ±1 authority (no inner mean-squash).
+        return torch.tanh(mean)
 
 
 class Critic(nn.Module):
@@ -242,11 +247,16 @@ class Critic(nn.Module):
         dist = TwoHot(logits, low=self.TWOHOT_LOW, high=self.TWOHOT_HIGH)
         return symexp(dist.mode())
 
-    def loss(self, latent: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Symlog twohot regression loss."""
+    def loss(self, latent: torch.Tensor, target: torch.Tensor,
+             weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Symlog twohot regression loss. Optional per-element `weight` (e.g. the imagination
+        discount weight) gives a weighted mean over elements instead of a plain mean."""
         logits = self.forward(latent)
         dist = TwoHot(logits, low=self.TWOHOT_LOW, high=self.TWOHOT_HIGH)
-        return -dist.log_prob(symlog(target)).mean()
+        nll = -dist.log_prob(symlog(target))           # (N,)
+        if weight is None:
+            return nll.mean()
+        return (weight * nll).sum() / weight.sum().clamp_min(1e-8)
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +392,7 @@ class DreamerV3Agent:
             p.requires_grad_(False)
 
         # Return EMA (for value normalisation)
-        self.return_ema = ReturnEMA(alpha=cfg.slow_target_fraction).to(self.device)
+        self.return_ema = ReturnEMA(alpha=cfg.return_ema_alpha).to(self.device)
 
         self.opt_wm = LaProp(self._get_wm_params(), lr=cfg.lr,
                              betas=(cfg.beta1, cfg.beta2), eps=cfg.eps)
@@ -401,6 +411,11 @@ class DreamerV3Agent:
         self._step: int = 0
         self._best_gates: float = 0.0
         self._update_count: int = 0
+        # Env-step threshold below which act() returns random actions and the trainer holds off
+        # updates. Defaults to cfg.warmup_steps; on resume the trainer raises it to
+        # (loaded_step + warmup_steps) to re-collect a fresh random-action window into the cold
+        # buffer (review R2 — replay is not checkpointed, so a resumed run starts buffer-empty).
+        self._warmup_until_step: int = cfg.warmup_steps
 
     # ------------------------------------------------------------------
     # World-model parameter and repr-loss hooks (override in subclasses)
@@ -550,7 +565,7 @@ class DreamerV3Agent:
         new_deter = new_deter.float()
         latent = self.rssm.get_feat(post_stoch, new_deter)
 
-        if self._step < self.cfg.warmup_steps:
+        if self._step < self._warmup_until_step:
             # Random action during warmup. Carry the SAME action we return so prev_action in the
             # next step matches what was actually applied to the environment.
             action = (torch.rand(N, self.cfg.action_dim, device=self.device) * 2 - 1)
@@ -581,9 +596,11 @@ class DreamerV3Agent:
         metrics = self._update_step(batch)
         self._update_count += 1
 
-        # LR warmup: scale LR linearly for first `warmup` grad steps
+        # LR warmup: scale LR linearly for first `warmup` grad steps. Use (count+1)/warmup so the
+        # final warmup step reaches the full lr (review lr-warmup-never-full: count/warmup peaks
+        # at (warmup-1)/warmup and never hits 1.0 before the gate closes).
         if self._update_count < self.cfg.warmup:
-            lr_scale = self._update_count / self.cfg.warmup
+            lr_scale = min(1.0, (self._update_count + 1) / self.cfg.warmup)
             for opt in (self.opt_wm, self.opt_actor, self.opt_critic):
                 for pg in opt.param_groups:
                     pg["lr"] = self.cfg.lr * lr_scale
@@ -684,14 +701,33 @@ class DreamerV3Agent:
         T_eff = T - 1
         latent_rew = latent_seq[:, 1:].reshape(B * T_eff, -1)
 
+        # Per-transition mask: 1.0 only when BOTH endpoint frames are real (not seq_len padding).
+        # Padded frames repeat the frozen terminal frame with reward=0; without masking, the
+        # reward/cont heads are trained on a chain of fake "episode continues at the crash frame"
+        # targets, wasting capacity and biasing the heads (review R1). Older buffers without a
+        # "mask" key fall back to all-ones (no padding info → unchanged behaviour).
+        if "mask" in data:
+            m = data["mask"].float()
+            mask_pair = (m[:, :-1] * m[:, 1:]).reshape(B * T_eff)
+        else:
+            mask_pair = torch.ones(B * T_eff, device=latent.device, dtype=latent.dtype)
+        mask_sum = mask_pair.sum().clamp_min(1.0)
+
         rew_logits = self.reward_head(latent_rew)
         rew_target = symlog(data["reward"][:, :-1].reshape(B * T_eff))
         rew_dist = TwoHot(rew_logits)
-        rew_loss = -rew_dist.log_prob(rew_target).mean()
+        rew_nll = -rew_dist.log_prob(rew_target)
+        rew_loss = (mask_pair * rew_nll).sum() / mask_sum
 
+        # Continue head trains on is_terminal (true death), NOT is_last (= terminated|truncated).
+        # The 20s time_out fires `truncated`; a truncated state is still alive and bootstrappable,
+        # so training cont=0 there makes the critic under-bootstrap long-survival value (review A3).
+        # is_terminal is threaded through replay.add; fall back to is_last for older buffers.
+        is_term = data["is_terminal"].float() if "is_terminal" in data else data["is_last"].float()
         cont_logits = self.cont_head(latent_rew).squeeze(-1)
-        cont_target = (1.0 - data["is_last"].float())[:, :-1].reshape(B * T_eff)
-        cont_loss = F.binary_cross_entropy_with_logits(cont_logits, cont_target)
+        cont_target = (1.0 - is_term)[:, :-1].reshape(B * T_eff)
+        cont_nll = F.binary_cross_entropy_with_logits(cont_logits, cont_target, reduction="none")
+        cont_loss = (mask_pair * cont_nll).sum() / mask_sum
 
         # KL loss — upstream split into separate dyn/rep with per-category free bits.
         # beta_dyn = KL(stop-grad post || prior) — pulls prior toward posterior.
@@ -718,7 +754,13 @@ class DreamerV3Agent:
         if self.priv_decoder is not None and "priv_state" in data:
             priv_pred = self.priv_decoder(latent)                              # (B*T, priv_dim)
             priv_target = data["priv_state"].reshape(B * T, -1).to(latent.dtype)
-            decoder_loss = F.mse_loss(symlog(priv_pred), symlog(priv_target))
+            # Mask padded (frozen terminal) frames out of the decoder regression too (review R1).
+            if "mask" in data:
+                m_full = data["mask"].float().reshape(B * T, 1)
+                sq = (symlog(priv_pred) - symlog(priv_target)).pow(2)
+                decoder_loss = (m_full * sq).sum() / (m_full.sum().clamp_min(1.0) * sq.shape[-1])
+            else:
+                decoder_loss = F.mse_loss(symlog(priv_pred), symlog(priv_target))
 
         total = (
             self.cfg.loss_scale_rew * rew_loss
@@ -755,75 +797,97 @@ class DreamerV3Agent:
         H = self.cfg.imag_horizon
         gamma = self.cfg.gamma
 
-        # Imagination rollout. stoch_seq shape: (H, B, S, K); deter_seq: (H, B, D).
+        # Imagination rollout. CONVENTION (rssm.imagine): the loop evaluates the actor at the
+        # CURRENT state then img_steps, appending the NEXT state. So for k in [0, H):
+        #   stoch_seq[k]/deter_seq[k] = s_{k+1}   (ARRIVAL states s_1..s_H)
+        #   act_seq[k], ent_seq[k]    = action/entropy at the DEPARTURE state s_k (s_0..s_{H-1})
         stoch_seq, deter_seq, act_seq, ent_seq = self.rssm.imagine(
             self.actor, init_stoch, init_deter, H
         )
 
         HH = stoch_seq.shape[0]
         B2 = stoch_seq.shape[1]
-        latent_seq = self.rssm.get_feat(stoch_seq, deter_seq)  # (H, B, latent_dim)
-        latent_flat = latent_seq.reshape(HH * B2, -1)
 
-        # Predicted rewards and continues along imagination
-        rew_logits = self.reward_head(latent_flat)
-        cont_logits = self.cont_head(latent_flat).squeeze(-1)
+        # Arrival latents feat(s_1..s_H). The reward/cont heads were trained (see
+        # _world_model_loss) to predict the reward/continue ARRIVING at a state, so they are
+        # evaluated on arrival states: rewards[k] = reward of the transition s_k -> s_{k+1}.
+        arr_latent = self.rssm.get_feat(stoch_seq, deter_seq)   # (H, B2, F)
+        arr_flat = arr_latent.reshape(HH * B2, -1)
 
+        rew_logits = self.reward_head(arr_flat)
+        cont_logits = self.cont_head(arr_flat).squeeze(-1)
         rew_dist = TwoHot(rew_logits)
-        rewards = symexp(rew_dist.mode()).reshape(HH, B2)
-        continues = torch.sigmoid(cont_logits).reshape(HH, B2)
+        rewards = symexp(rew_dist.mode()).reshape(HH, B2)        # r_k, transition s_k->s_{k+1}
+        continues = torch.sigmoid(cont_logits).reshape(HH, B2)   # discount arriving at s_{k+1}
 
-        # Bootstrap V(s_H) using target critic — no grad
+        # Departure latents feat(s_0..s_{H-1}). s_0 is the real imagination-start posterior
+        # latent; arr_latent[:-1] = feat(s_1..s_{H-1}). These are the states whose value /
+        # return we train the critic and actor on.
+        dep0 = self.rssm.get_feat(init_stoch, init_deter).reshape(1, B2, -1)  # feat(s_0)
+        dep_latent = torch.cat([dep0, arr_latent[:-1]], dim=0)               # (H, B2, F)
+        dep_flat = dep_latent.reshape(HH * B2, -1)
+
+        # Value series aligned to DEPARTURE states: V(s_0..s_H), length H+1. lambda_return then
+        # bootstraps transition t with values[t+1] = V(s_{t+1}) (correct one-step TD target) and
+        # terminates with values[-1] = V(s_H). The previous code returned V(s_1..s_{H+1}) and so
+        # bootstrapped off V(s_{t+2}) — a one-state-too-far shift that inflated EVERY target
+        # (review C1, the root cause of imag/return_mean >> real return and return/scale blow-up).
         with torch.no_grad():
-            vals = self.target_critic.value(latent_flat).reshape(HH, B2)
-            # One extra step beyond horizon
-            last_stoch = stoch_seq[-1]
-            last_deter = deter_seq[-1]
-            last_feat = self.rssm.get_feat(last_stoch, last_deter)
-            last_action, _ = self.actor(last_feat)
-            boot_stoch, boot_deter = self.rssm.img_step(last_stoch, last_deter, last_action)
-            boot_latent = self.rssm.get_feat(boot_stoch, boot_deter)
-            bootstrap = self.target_critic.value(boot_latent)            # (B2,)
+            v_dep = self.target_critic.value(dep_flat).reshape(HH, B2)        # V(s_0..s_{H-1})
+            v_last = self.target_critic.value(arr_latent[-1]).reshape(1, B2)  # V(s_H)
+            vals_dep = torch.cat([v_dep, v_last], dim=0)                       # (H+1, B2)
 
-        vals_with_boot = torch.cat([vals, bootstrap.unsqueeze(0)], dim=0)  # (H+1, B2)
-        targets = lambda_return(rewards, vals_with_boot, continues,
-                                gamma=gamma, lam=self.cfg.lam)           # (H, B2)
+        # targets[k] = lambda-return G(s_k) for departure states s_0..s_{H-1}.
+        targets = lambda_return(rewards, vals_dep, continues,
+                                gamma=gamma, lam=self.cfg.lam)               # (H, B2)
 
         # Update return EMA
         self.return_ema.update(targets)
         targets_norm = self.return_ema.normalize(targets)
 
-        # Actor loss: maximise value + entropy bonus.
-        # Use a SEPARATE floor-penalty term — the old `entropy + F.relu(min - entropy)` formulation
-        # algebraically collapses to a constant `entropy_min` when entropy < min, killing the gradient
-        # exactly when the policy needed it most. Now: baseline entropy bonus + extra penalty for
-        # dropping below the floor, both differentiable.
-        #
-        # entropy is the ANALYTIC pre-tanh Gaussian entropy returned by Actor.forward —
-        # closed form, bounded since log_std is clamped, no MC noise.
-        entropy = ent_seq.reshape(HH * B2).mean()
+        # Imagination discount weight w_k = prod_{j<k}(gamma * continues_j), w_0 = 1. Down-weights
+        # imagined steps AFTER a predicted termination so the actor/critic are not trained on
+        # unreachable post-crash states (review A1). Detached — the weight carries no gradient.
+        with torch.no_grad():
+            disc = gamma * continues                                          # (H, B2)
+            weight = torch.cumprod(
+                torch.cat([torch.ones_like(disc[:1]), disc[:-1]], dim=0), dim=0
+            )
+        w_flat = weight.reshape(HH * B2)
+        w_sum = w_flat.sum().clamp_min(1e-8)
+
+        # Actor loss: value-gradient (targets backprop through the imagined dynamics) + entropy
+        # bonus, both weighted by w. SEPARATE floor-penalty term so the gradient survives below
+        # the floor (the old `entropy + relu(min - entropy)` collapses to a constant there).
+        # ent_seq is departure-indexed (s_0..s_{H-1}), matching targets and w.
+        ent_flat = ent_seq.reshape(HH * B2)
+        entropy = (w_flat * ent_flat).sum() / w_sum
         floor_pen = F.relu(torch.tensor(self.cfg.entropy_min, device=entropy.device) - entropy)
-        actor_loss = -targets_norm.reshape(HH * B2).mean()
-        actor_loss = actor_loss - self.cfg.entropy_scale * entropy + self.cfg.entropy_floor_weight * floor_pen
+        actor_value = (w_flat * targets_norm.reshape(HH * B2)).sum() / w_sum
+        actor_loss = -actor_value - self.cfg.entropy_scale * entropy + self.cfg.entropy_floor_weight * floor_pen
 
-        # Critic loss (twohot regression on stopped targets)
-        targets_sg = targets.detach()
-        crit_loss = self.critic.loss(latent_flat.detach(), targets_sg.reshape(HH * B2))
-
-        # Repval loss: critic on post-hoc reprojected latents (online critic self-distillation)
-        repval_loss = self.critic.loss(latent_flat.detach(),
-                                       vals.detach().reshape(HH * B2))
+        # Critic loss: weighted twohot regression of V(s_0..s_{H-1}) onto detached lambda targets.
+        crit_loss = self.critic.loss(dep_flat.detach(), targets.detach().reshape(HH * B2),
+                                     weight=w_flat.detach())
 
         total_ac = (
             self.cfg.loss_scale_policy * actor_loss
             + self.cfg.loss_scale_value * crit_loss
-            + self.cfg.loss_scale_repval * repval_loss
         )
 
-        # actor/entropy above is the analytic PRE-tanh Gaussian entropy — it can exceed the
-        # tanh-squashed policy's theoretical max (~2.77 nats for action_dim=4). These two
-        # diagnostics measure the real squashed action distribution: abs_mean shows whether
-        # the actor commits to non-trivial actions, sat_frac measures tanh saturation.
+        # Optional slow-critic self-distillation. Disabled by default (loss_scale_repval=0):
+        # the old term regressed the online critic onto the SAME target_critic already used to
+        # bootstrap the lambda-return — a redundant contraction toward the lagged estimate that
+        # spent ~30% of the critic gradient reproducing its own shadow (review A2).
+        if self.cfg.loss_scale_repval > 0:
+            repval_loss = self.critic.loss(dep_flat.detach(), v_dep.detach().reshape(HH * B2),
+                                           weight=w_flat.detach())
+            total_ac = total_ac + self.cfg.loss_scale_repval * repval_loss
+        else:
+            repval_loss = torch.zeros((), device=actor_loss.device)
+
+        # Squashed-action diagnostics: actor/entropy is now the squashed-policy entropy, but
+        # these still directly measure commitment + saturation of the executed action.
         with torch.no_grad():
             action_abs_mean = act_seq.abs().mean()
             action_sat_frac = (act_seq.abs() > 0.95).float().mean()
@@ -837,7 +901,7 @@ class DreamerV3Agent:
             "critic/loss": crit_loss.item(),
             "critic/repval_loss": repval_loss.item(),
             "imag/reward_mean": rewards.mean().item(),
-            "imag/value_mean": vals.mean().item(),
+            "imag/value_mean": v_dep.mean().item(),
             "imag/return_mean": targets.mean().item(),
             "return/scale": self.return_ema.scale.item(),
         }

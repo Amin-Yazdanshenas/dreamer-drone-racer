@@ -550,8 +550,9 @@ class NEDreamerTransformer(nn.Module):
         self.heads_next = nn.ModuleList([_head() for _ in range(predict_horizon)]) if use_next else None
         self.head_same = _head() if use_same else None
 
+        # pos_embed already initialised at construction (line ~529); _init_weights only touches
+        # nn.Linear, so no re-init needed here (review ne-pos-embed-double-init).
         self._init_weights()
-        nn.init.normal_(self.pos_embed, std=0.02)
 
     def _init_weights(self):
         for m in self.modules():

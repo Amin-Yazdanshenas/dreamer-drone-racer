@@ -105,12 +105,15 @@ class DreamerIsaacEnvWrapper:
         obs = self._extract_obs()
         obs["reward"] = rew_cpu
         obs["gate_passed"] = gate_passed
-        obs["is_first"] = self._is_first.clone()
+        # is_first for THIS frame = is_last of THIS step. Isaac Lab auto-resets in-step, so the
+        # obs returned here is already the next episode's first frame whenever is_last is True;
+        # it must therefore carry is_first=True NOW. The previous code carried the PREVIOUS
+        # step's flag forward (self._is_first), landing is_first=True one frame too late — on the
+        # new episode's SECOND frame — so the RSSM reset never fired on the true first frame and
+        # leaked the dying episode's deter/action into the new episode (review I1).
+        obs["is_first"] = is_last.clone()
         obs["is_last"] = is_last
         obs["is_terminal"] = is_terminal
-
-        # Next step is_first = True only for envs that just ended
-        self._is_first = is_last.clone()
         return obs
 
     # ------------------------------------------------------------------

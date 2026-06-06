@@ -161,17 +161,22 @@ class TwoHot:
         self.bins = logits.shape[-1]
         self.low = low
         self.high = high
-        self._bin_values = torch.linspace(low, high, self.bins, device=logits.device, dtype=logits.dtype)
+        # Bins ALWAYS float32, regardless of logits dtype. Under bf16/fp16 autocast the reward
+        # and critic logits are low-precision; building the bin lattice in that dtype quantised
+        # the twohot soft-label interpolation weights (~3 sig digits), biasing the reward/value
+        # regression by up to ~0.8 nat/sample (review N1). log_prob upcasts the logits to f32, so
+        # f32 bins keep the whole interpolation consistent.
+        self._bin_values = torch.linspace(low, high, self.bins, device=logits.device, dtype=torch.float32)
 
     def mode(self) -> torch.Tensor:
-        probs = torch.softmax(self.logits, dim=-1)
+        probs = torch.softmax(self.logits.float(), dim=-1)
         return (probs * self._bin_values).sum(-1)
 
     def mean(self) -> torch.Tensor:
         return self.mode()
 
     def log_prob(self, target: torch.Tensor) -> torch.Tensor:
-        target = target.clamp(self.low, self.high)
+        target = target.float().clamp(self.low, self.high)
         bins = self._bin_values
         idx = torch.searchsorted(bins.contiguous(), target.contiguous())
         idx = idx.clamp(1, self.bins - 1)

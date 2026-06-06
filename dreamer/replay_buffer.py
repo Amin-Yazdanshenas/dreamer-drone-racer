@@ -86,10 +86,15 @@ class SequenceReplayBuffer:
             actions: torch.Tensor,
             rewards: torch.Tensor,
             is_first: torch.Tensor,
-            is_last: torch.Tensor) -> None:
+            is_last: torch.Tensor,
+            is_terminal: torch.Tensor | None = None) -> None:
         """Add one vectorised step (N envs) to the buffer.
 
         All tensors on any device; converted to CPU numpy here for storage.
+
+        is_terminal (terminated only, NOT truncated): stored so the world model's continue head
+        can train on true episode death rather than time-limit truncation. Optional for
+        back-compat — defaults to is_last when not supplied.
         """
         N = actions.shape[0]
         image_np = obs_dict["image"].cpu().numpy()              # (N, H, W, C) uint8
@@ -98,6 +103,8 @@ class SequenceReplayBuffer:
         rew_np = rewards.cpu().float().numpy()                  # (N,)
         first_np = is_first.cpu().bool().numpy()                # (N,)
         last_np = is_last.cpu().bool().numpy()                  # (N,)
+        term_np = (is_terminal.cpu().bool().numpy() if is_terminal is not None
+                   else last_np)                                # (N,)
         # Privileged state for Informed-Dreamer decoder. Optional — older buffers
         # without this key still work (agent skips decoder loss when key absent).
         priv_np = (
@@ -114,6 +121,11 @@ class SequenceReplayBuffer:
                 "reward": rew_np[i],
                 "is_first": first_np[i],
                 "is_last": last_np[i],
+                "is_terminal": term_np[i],
+                # mask = 1.0 for real collected frames, 0.0 for seq_len padding below. The WM
+                # loss uses it to exclude frozen-terminal pad frames from the reward/cont/decoder
+                # regression (review R1).
+                "mask": np.array(1.0, dtype=np.float32),
             }
             if priv_np is not None:
                 step["priv_state"] = priv_np[i]
@@ -137,6 +149,11 @@ class SequenceReplayBuffer:
                                 lst.append(np.zeros_like(last))
                             elif k == "is_last":
                                 lst.append(np.ones_like(last))
+                            elif k == "is_terminal":
+                                # Pads are repeated frozen frames, not fresh deaths.
+                                lst.append(np.zeros_like(last))
+                            elif k == "mask":
+                                lst.append(np.array(0.0, dtype=np.float32))
                             else:
                                 lst.append(last.copy() if hasattr(last, "copy") else last)
                 ep = self._ep_bufs[i].flush()

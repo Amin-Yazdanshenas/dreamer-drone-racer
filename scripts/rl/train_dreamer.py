@@ -199,6 +199,14 @@ def main():
     if args_cli.checkpoint:
         agent.load(args_cli.checkpoint)
         print(f"[DreamerV3] Resumed from {args_cli.checkpoint}")
+        # The replay buffer is NOT checkpointed (review R2), so a resumed run starts buffer-empty.
+        # Re-enter a random-action collection window of cfg.warmup_steps so the cold buffer
+        # refills with exploration diversity before on-policy updates resume, instead of
+        # immediately overfitting the resumed policy onto a thin fresh buffer.
+        agent._warmup_until_step = agent._step + cfg.warmup_steps
+        print(f"[DreamerV3] Resume: random-action buffer refill until env-step "
+              f"{agent._warmup_until_step:,} (buffer starts empty — not checkpointed).",
+              flush=True)
 
     # ----------------------------------------------------------------
     # Logging
@@ -277,6 +285,7 @@ def main():
             next_obs["reward"],
             obs["is_first"],
             next_obs["is_last"],
+            next_obs["is_terminal"],
         )
 
         done_mask = next_obs["is_last"]
@@ -328,7 +337,9 @@ def main():
             )
 
         # --- Learn ---
-        if step >= cfg.warmup_steps and step % (cfg.update_every * env.num_envs) == 0:
+        # Gate on agent._warmup_until_step (== cfg.warmup_steps for fresh runs; raised on resume
+        # to re-collect a random-action window into the cold buffer — review R2).
+        if step >= agent._warmup_until_step and step % (cfg.update_every * env.num_envs) == 0:
             for _ in range(cfg.n_grad_steps):
                 metrics = agent.update(replay)
                 if metrics:

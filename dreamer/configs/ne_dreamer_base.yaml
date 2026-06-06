@@ -31,7 +31,10 @@ dyn_layers: 1
 
 beta_dyn: 0.5
 beta_rep: 0.1
-kl_free: 1.0
+# kl_free 0.1 matches the R2 remediation. At 1.0 with stoch=32 the per-category free-bits floor
+# pins total KL >= 32 nats and zeros the KL gradient, so the world model never learns
+# state-conditional posteriors (the documented wm/dyn_loss-stuck-at-32 pathology). See dreamer_base.yaml.
+kl_free: 0.1
 
 imag_horizon: 15
 horizon: 333

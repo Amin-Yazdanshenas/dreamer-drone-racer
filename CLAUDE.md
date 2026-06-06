@@ -118,7 +118,7 @@ Isaac Lab multiplies all reward terms by `dt = sim_dt × decimation = 0.01s/step
 | `configs/dreamer_base.yaml` | h_dim=2048, stoch=32, discrete=16, hidden=256, batch_size=16, seq_len=64, lr=4e-5. |
 | `configs/ctbr_gains.yaml` | CTBR PD gains, `max_thrust=23.82 N`, `hover_thrust=5.96 N`. |
 | `configs/ne_dreamer_*.yaml` | NE-Dreamer overrides. |
-| `actor_critic.py` | **DEAD CODE** — inline `Actor`/`Critic` in `agent.py` are used. |
+| (`actor_critic.py`, `world_model.py`, `utils.py` deleted) | Were dead — inline `Actor`/`Critic`/world-model-loss live in `agent.py`; symlog/twohot live in `distributions.py`. Removed in the post-review cleanup. |
 
 ### Dynamics (`dynamics/`)
 Pure-PyTorch, no Isaac Sim deps. `Allocation` (omega² → wrench matrix) + `Motor` (first-order lag). Used by the LEGACY `ControlAction` only. Dreamer uses `CTBRAction`. `tests/test_dynamics.py` has a pre-existing import error (unrelated to current work).
