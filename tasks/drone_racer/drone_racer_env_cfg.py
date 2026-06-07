@@ -681,7 +681,7 @@ class DroneRacerEnvCfg_Dreamer_PLAY(ManagerBasedRLEnvCfg):
         # passes one. 2 m RGB axes (X=red points along the gate normal / through-direction).
         self.commands.target.debug_vis = True
         self.commands.target.target_visualizer_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
-        self.commands.target.drone_visualizer_cfg.markers["frame"].scale = (0.05, 0.05, 0.05)
+        self.commands.target.drone_visualizer_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
         self.decimation = 4
         self.episode_length_s = 20
         self.viewer.eye = (-10.0, -10.0, 10.0)
