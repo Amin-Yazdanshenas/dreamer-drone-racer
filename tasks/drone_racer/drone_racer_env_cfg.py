@@ -223,15 +223,21 @@ class RewardsCfg:
     # mid-training. -0.02 puts the per-episode cost at ~-1.0 (≈30% of reward at +3.3), strong
     # enough to push action_abs_mean down without destabilising the actor's target distribution.
     ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.02)
-    # progress weight bumped 10 -> 50 after the 4.17M-step run showed the drone learning a
-    # passive-hover local minimum: env/episode_length climbed to 421 RL steps (~4.2 s) and
-    # episode_reward reached +9.66, but env/episode_gates stayed at 0 — drone was banking
-    # near_gate dense reward by hovering ~10 m from a gate without ever passing through.
-    # Stronger forward-motion signal so the actor sees an active incentive to close distance.
+    # progress is now SIGNED (asymmetric=False) — this is the parking-proof, potential-based
+    # dense reward the working skrl-PPO baseline uses. It rewards closing distance to the target
+    # gate AND PENALISES drifting away. A 5M-step run with proximity shaping (near_gate) + the
+    # old asymmetric progress produced a drone that wandered near gates and never passed
+    # (eval: 0/10 gates, collision rate 1.0, "drifts away from the gate"); the absolute
+    # proximity salary peaked just before the gate and collapsed on passing, so the value-correct
+    # actor learned to loiter, not cross. Signed progress has no static spot that pays — the only
+    # way to keep earning is to keep closing -> pass -> close on the next gate -> repeat — and it
+    # directly punishes the observed drift. Pre-C1-fix this term was clamped to avoid drift
+    # exploitation, but with the value targets now correct (review C1) the signed form is right
+    # and matches the proven PPO reward.
     progress = RewTerm(
         func=mdp.progress,
         weight=50.0,
-        params={"command_name": "target", "asymmetric": True},
+        params={"command_name": "target", "asymmetric": False},
     )
     gate_passed = RewTerm(
         func=mdp.gate_passed,
@@ -239,26 +245,18 @@ class RewardsCfg:
         params={"command_name": "target", "penalize_miss": False},
     )
     lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.5, params={"command_name": "target", "std": 0.5})
-    # Dense distance shaping RESHAPED: weight 5 -> 25, std 5.0 -> 1.5. After the C1/A1/A4/A5
-    # correctness fixes the value function was verified self-consistent (|return-value| gap
-    # ~0.018) yet the drone still parked near a gate without passing — a reward-shape local
-    # optimum, not a bug. The old wide std=5 paid a salary far from the gate (at 10 m,
-    # weight*(1-tanh(10/5)) = 5*0.036 = 0.18/step) that rewarded hovering; and the shallow
-    # tanh gave almost no gradient pulling the drone the last few metres INTO the gate.
-    #
-    # pos_error_tanh = weight * (1 - tanh(dist/std)). std 1.5 -> 3.0: the first reshaped run
-    # (245k steps) went REWARD-NEGATIVE and never learned to pass — std=1.5 was too steep for the
-    # spawn distance. At spawn_lerp_alpha=0.6 the drone starts ~40% of the segment from the
-    # target (~4 m on a 10 m segment), where std=1.5 gives only 25*(1-tanh(4/1.5))=0.22/step — a
-    # reward desert exactly where the episode begins, so the actor saw ~flat-zero shaping plus
-    # the ang_vel/crash penalties and drifted. std=3.0 restores a real gradient across the spawn
-    # range while keeping a steep centre pull and negligible far-field salary:
-    #   8 m: 25*(1-tanh(2.67)) = 0.22   4 m (spawn): 3.3   1.5 m: 13.5   0.75 m: 16.7   centre: 25
-    # So the drone gets signal from the moment it spawns and is pulled smoothly through the gate
-    # centre; the gate_passed +100 spike rewards completing the pass.
+    # near_gate DISABLED (weight 0). This absolute-proximity term was the parking wall: it
+    # rewards being CLOSE, but passing a gate switches the target to the next (far) gate, so the
+    # reward collapses on passing — the dense landscape peaks just before the gate plane and
+    # drops on the far side. Across the whole session (steep std=1.5, moderate std=3.0, weights
+    # 5/20/25) the value-correct actor always learned to loiter at the approach and never cross
+    # (final eval: 0/10 gates, drifts away, collision rate 1.0). Potential-based signed progress
+    # above replaces it — no static spot pays, so loitering is not an optimum. Kept here at
+    # weight 0 (not deleted) so a small proximity bonus can be re-introduced later if the pure
+    # progress + gate_passed signal proves too sparse near the gate centre.
     near_gate = RewTerm(
         func=mdp.pos_error_tanh,
-        weight=25.0,
+        weight=0.0,
         params={"command_name": "target", "std": 3.0},
     )
 
