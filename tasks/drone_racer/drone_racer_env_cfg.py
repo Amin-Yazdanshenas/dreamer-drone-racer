@@ -673,6 +673,15 @@ class DroneRacerEnvCfg_Dreamer_PLAY(ManagerBasedRLEnvCfg):
     def __post_init__(self) -> None:
         self.events.push_robot = None
         self.scene.tiled_camera.data_types = ["rgb", "semantic_segmentation"]
+        # PLAY-only: draw a visible coordinate-frame marker on the CURRENT target gate (the one
+        # the drone should fly toward) and a smaller one on the drone. The command term already
+        # visualises next_gate_w / robot pose in _debug_vis_callback, but the marker scale is set
+        # to ~0 (invisible) and debug_vis is off by default. Enable + enlarge here so during eval
+        # you can see which gate is the target — it jumps to the next gate the instant the drone
+        # passes one. 2 m RGB axes (X=red points along the gate normal / through-direction).
+        self.commands.target.debug_vis = True
+        self.commands.target.target_visualizer_cfg.markers["frame"].scale = (2.0, 2.0, 2.0)
+        self.commands.target.drone_visualizer_cfg.markers["frame"].scale = (0.5, 0.5, 0.5)
         self.decimation = 4
         self.episode_length_s = 20
         self.viewer.eye = (-10.0, -10.0, 10.0)
