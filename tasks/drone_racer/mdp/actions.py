@@ -256,7 +256,11 @@ class CTBRAction(ActionTerm):
             env_ids = self._robot._ALL_INDICES
         self._raw_actions[env_ids] = 0.0
         self._omega_des[env_ids] = 0.0
-        self._collective[env_ids] = 0.0
+        # Initialise the processed collective to HOVER, not 0. The neutral action (c=0) maps to
+        # hover thrust, so a freshly-reset env should sit at hover; resetting to 0 (zero thrust)
+        # risks a brief downward/destabilising transient if apply_actions runs before the next
+        # process_actions after a reset.
+        self._collective[env_ids] = self._hover_thrust
         self._prev_ang_vel[env_ids] = 0.0
         self._prev_err[env_ids] = 0.0
         self._robot.reset(env_ids)

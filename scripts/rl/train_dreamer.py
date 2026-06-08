@@ -295,12 +295,17 @@ def main():
             rew_vals = next_obs["reward"][idx]
             cmd = env._isaac.command_manager.get_term(env.command_name)
             next_idx = cmd.next_gate_idx[idx].detach().cpu().tolist()
-            target_pb = next_obs["state"][idx, -3:].detach().cpu().tolist()
+            # State layout (16-dim): ang_vel[0:3] quat[3:7] lin_vel[7:10] target_pos_b[10:13]
+            # gate_normal_b[13:16]. (The old print used [-3:], which is now gate_normal_b, not
+            # target_pos_b — fixed.)
+            target_pb = next_obs["state"][idx, 10:13].detach().cpu().tolist()
+            gate_nb = next_obs["state"][idx, 13:16].detach().cpu().tolist()
             print(
                 f"[GATE-PASS] step={step}  envs={idx.tolist()}  "
                 f"reward={[round(float(v), 3) for v in rew_vals]}  "
                 f"next_gate_idx={next_idx}  "
                 f"target_pos_b={[[round(float(c), 2) for c in row] for row in target_pb]}  "
+                f"gate_normal_b={[[round(float(c), 2) for c in row] for row in gate_nb]}  "
                 f"episode_gates={[float(ep_gates[i].item()) for i in idx]}  "
                 f"is_last={[bool(next_obs['is_last'][i].item()) for i in idx]}",
                 flush=True,
