@@ -61,6 +61,8 @@ parser.add_argument("--gatenet_ckpt", type=str, default=None,
 parser.add_argument("--config", type=str, default=None,
                     help="Path to dreamer YAML config (default: auto from obs_mode).")
 parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--no_curriculum", action="store_true", default=False,
+                    help="Disable the spawn_lerp_alpha annealing curriculum (keep the cfg value fixed).")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -87,6 +89,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 import os
 import random
+from collections import deque
 from datetime import datetime
 
 import gymnasium as gym
@@ -250,6 +253,30 @@ def main():
     gate_pass_window_steps = 0
     last_gate_pass_log = step
 
+    # ----------------------------------------------------------------
+    # Spawn-curriculum annealing.
+    # A static spawn_lerp_alpha=0.9 spawns the drone AT the target gate: the first pass is
+    # trivial, but on passing, the target switches to the next gate a full segment away and the
+    # drone has never practised the approach — it can't chain, drifts, and the value collapses
+    # (observed: episode_gates 0.40 -> 0.16, imag/value +0.05 -> -2.87 over 107k->330k steps).
+    # The fix is to SHRINK alpha as the drone succeeds, so it progressively learns longer
+    # approaches. Advance to the next (lower) alpha once a rolling window of recent episodes
+    # averages >= ADVANCE_THRESHOLD gates/episode at the current alpha.
+    cmd_term = env._isaac.command_manager.get_term(env.command_name)
+    ALPHA_STAGES = [0.9, 0.7, 0.5, 0.3, 0.1]
+    ADVANCE_THRESHOLD = 0.6          # mean gates/episode over the window to advance
+    STAGE_WINDOW = 300               # rolling episodes considered
+    MIN_EPISODES_PER_STAGE = 300     # don't advance before this many episodes at the stage
+    use_curriculum = not args_cli.no_curriculum
+    stage_idx = 0
+    recent_gates: deque = deque(maxlen=STAGE_WINDOW)
+    episodes_at_stage = 0
+    if use_curriculum:
+        cmd_term.cfg.spawn_lerp_alpha = ALPHA_STAGES[stage_idx]
+        print(f"[CURRICULUM] spawn_lerp_alpha = {ALPHA_STAGES[stage_idx]} (stage 0/"
+              f"{len(ALPHA_STAGES)-1}); anneals down as gates/episode >= {ADVANCE_THRESHOLD}",
+              flush=True)
+
     while step < args_cli.max_steps:
         # --- Collect ---
         with torch.no_grad():
@@ -304,6 +331,7 @@ def main():
             writer.add_scalar("env/gate_pass_rate", rate, step)
             writer.add_scalar("replay/buffer_size", len(replay), step)
             writer.add_scalar("replay/num_episodes", replay.num_episodes, step)
+            writer.add_scalar("curriculum/spawn_lerp_alpha", cmd_term.cfg.spawn_lerp_alpha, step)
             gate_pass_window_passes = 0
             gate_pass_window_steps = 0
             last_gate_pass_log = step
@@ -319,6 +347,27 @@ def main():
                 ep_lengths[i] = 0.0
                 ep_gates[i] = 0.0
                 ep_count += 1
+                # Curriculum: track per-episode gate count and advance (lower alpha) when the
+                # drone is reliably passing at the current spawn distance.
+                if use_curriculum:
+                    recent_gates.append(gates_i)
+                    episodes_at_stage += 1
+                    if (
+                        stage_idx < len(ALPHA_STAGES) - 1
+                        and episodes_at_stage >= MIN_EPISODES_PER_STAGE
+                        and len(recent_gates) >= STAGE_WINDOW
+                        and (sum(recent_gates) / len(recent_gates)) >= ADVANCE_THRESHOLD
+                    ):
+                        prev_alpha = ALPHA_STAGES[stage_idx]
+                        stage_idx += 1
+                        new_alpha = ALPHA_STAGES[stage_idx]
+                        cmd_term.cfg.spawn_lerp_alpha = new_alpha
+                        print(f"[CURRICULUM] step={step:,}  advance stage {stage_idx-1}->{stage_idx}  "
+                              f"spawn_lerp_alpha {prev_alpha} -> {new_alpha}  "
+                              f"(rolling gates/ep={sum(recent_gates)/len(recent_gates):.2f})",
+                              flush=True)
+                        recent_gates.clear()
+                        episodes_at_stage = 0
 
         obs = next_obs
         step += env.num_envs
