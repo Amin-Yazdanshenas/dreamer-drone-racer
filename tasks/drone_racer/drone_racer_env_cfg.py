@@ -225,7 +225,13 @@ class RewardsCfg:
     # episode but then collapsed -- the penalty was strong enough to invert the value landscape
     # mid-training. -0.02 puts the per-episode cost at ~-1.0 (≈30% of reward at +3.3), strong
     # enough to push action_abs_mean down without destabilising the actor's target distribution.
-    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.02)
+    # ang_vel_l2 -0.02 -> -0.002. -0.02 was 200x the PPO baseline (-0.0001) and PENALISES the
+    # rotation the drone needs to turn toward / line up with a gate — a dense negative that
+    # fights navigation and feeds the recurring value collapse. The actor no longer saturates
+    # (action_sat_frac ~0.03 with the mean-tanh/Jacobian-entropy fixes), so the strong
+    # attitude prior is no longer needed to prevent tumbling. -0.002 keeps a mild damping
+    # without taxing legitimate maneuvering.
+    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.002)
     # progress is now SIGNED (asymmetric=False) — this is the parking-proof, potential-based
     # dense reward the working skrl-PPO baseline uses. It rewards closing distance to the target
     # gate AND PENALISES drifting away. A 5M-step run with proximity shaping (near_gate) + the
@@ -662,7 +668,16 @@ class DroneRacerEnvCfg_Dreamer(ManagerBasedRLEnvCfg):
         self.commands.target.spawn_lerp_alpha = 0.9
         # Both RGB and segmentation must be available for all three obs modes
         self.scene.tiled_camera.data_types = ["rgb", "semantic_segmentation"]
-        self.decimation = 4
+        # decimation 4 -> 12: the actor's DECISION rate drops from 100 Hz to ~33 Hz (control dt
+        # 0.01 s -> 0.03 s). The inner CTBR PD rate loop still runs at the 400 Hz physics rate
+        # (it tracks the held setpoint every substep), so attitude control is unaffected — only
+        # how often the actor re-decides. This makes the imagination horizon cover real flight
+        # time: imag_horizon=15 * 0.03 s = 0.45 s (was 10 * 0.01 = 0.1 s), and a seq_len=64
+        # training sequence now spans ~1.9 s — enough to contain an inter-gate approach. The
+        # 0.1 s planning horizon was far shorter than the 1-2 s gate-to-gate flight, so the actor
+        # could never imagine reaching a gate and the bootstrapped value collapsed on the
+        # net-negative dense reward. This is the structural fix after reward shaping plateaued.
+        self.decimation = 12
         self.episode_length_s = 20
         self.viewer.eye = (-10.0, -10.0, 10.0)
         self.viewer.lookat = (0.0, 0.0, 0.0)

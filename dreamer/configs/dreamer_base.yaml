@@ -61,14 +61,14 @@ priv_state_dim: 12
 loss_scale_decoder: 1.0
 
 # ----- Actor-critic -----
-# imag_horizon dropped from the DreamerV3 default 15 to 10. The 460k-step run with stronger
-# attitude shaping showed imag/return_mean inflating to +1.44 while real episodes pulled
-# +3.76 -> -2.44 -> +3.76 (highly variable). return/scale tracked the imag inflation to +6.06,
-# which destabilised the actor's normalised targets. Shorter horizon compounds less model error
-# and keeps imag/return closer to realistic episode returns. Can be raised back to 15 once the
-# WM posterior is using more capacity (currently ~2.3 nats out of 32-nat budget).
-imag_horizon: 10
-horizon: 333            # discount horizon → gamma = 1 - 1/333 ≈ 0.997
+# imag_horizon 10 -> 15 (DreamerV3 default). Combined with decimation 4 -> 12 (control dt
+# 0.01 -> 0.03 s) the imagination now covers 15 * 0.03 = 0.45 s of real flight instead of
+# 0.1 s. The 0.1 s horizon was far shorter than the 1-2 s gate-to-gate flight, so the actor
+# could never imagine reaching a gate — it only optimised 0.1 s of net-negative dense reward
+# and the bootstrapped value collapsed. (It was temporarily dropped to 10 to fight a return
+# inflation that turned out to be the C1 lambda-return bug, since fixed.)
+imag_horizon: 15
+horizon: 333            # discount horizon → gamma = 1 - 1/333 ≈ 0.997 (= 10 s at the 33 Hz rate)
 lam: 0.95
 entropy_scale: 3.0e-3   # 10x paper: bare 3e-4 collapsed policy in earlier runs
 entropy_min: 1.0        # entropy floor (nats)
