@@ -215,7 +215,10 @@ class RewardsCfg:
     # - progress weight 10, asymmetric clamp (no negative progress reward)
     # - gate_passed 10000: dt-scales to +100 per pass (10× bigger than max drift reward)
     # - lookat_next kept small
-    terminating = RewTerm(func=mdp.is_terminated, weight=-2.0)
+    # terminating -2 -> -20: with signed progress, -2 (=-0.02/crash after dt) was too cheap —
+    # early runs suicided (crash instantly to stop the negative dense reward), later runs drifted.
+    # -20 (=-0.2/crash) deters crash-escape without the -500/-0.02-dominates-everything extreme.
+    terminating = RewTerm(func=mdp.is_terminated, weight=-20.0)
     # Dialled back to -0.02 after the -0.05 run showed catastrophic instability:
     # episode_length swung 1 -> 340 -> 66 RL steps, episode_reward swung -0.06 -> -2.44 -> +3.76,
     # return/scale escalated to +6.06 (vs +4.25 at -0.01). The actor briefly mastered a 3.4s
@@ -641,13 +644,16 @@ class DroneRacerEnvCfg_Dreamer(ManagerBasedRLEnvCfg):
         # actor coverage across all 7 gate-to-gate transitions on the track instead of only
         # the gate0→gate1 segment, which it needs to learn full lap navigation.
         self.commands.target.randomise_start = True
-        # Curriculum: spawn 60% of the way from the previous gate toward the NEXT gate
-        # (spawn_lerp_alpha 0.3 -> 0.6). After the correctness fixes the drone flies stably but
-        # never discovers a gate pass from a far spawn — passing is too rare for exploration to
-        # find. Spawning close to the target makes the first pass easy to stumble into, so the
-        # gate_passed +100 spike actually enters the returns and the actor can learn it. Anneal
-        # back toward 0.3 once gate_pass_rate is consistently > ~5% (drop in a later run).
-        self.commands.target.spawn_lerp_alpha = 0.6
+        # EXTREME curriculum: spawn 90% of the way from the previous gate toward the NEXT gate
+        # (spawn_lerp_alpha 0.6 -> 0.9). A 3.8M-step run with 0.6 + signed progress never passed
+        # a gate — the drone flew ~3 s, drifted away from the target (net-negative progress, value
+        # collapsed to ~-21), and the +100 gate spike never entered its experience. At 0.9 the
+        # drone spawns essentially AT the gate, facing through it with a forward velocity bias, so
+        # it should pass within a step or two and the gate_passed reward floods the data — the
+        # actor finally learns passing is hugely positive. This is also DIAGNOSTIC: if the drone
+        # still can't pass when spawned right at the gate, the problem is control/algorithm, not
+        # reward shaping. Anneal back down once gate_pass_rate is consistently > ~5%.
+        self.commands.target.spawn_lerp_alpha = 0.9
         # Both RGB and segmentation must be available for all three obs modes
         self.scene.tiled_camera.data_types = ["rgb", "semantic_segmentation"]
         self.decimation = 4
