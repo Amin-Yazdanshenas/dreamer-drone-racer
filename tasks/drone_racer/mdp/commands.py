@@ -242,12 +242,17 @@ class GateTargetingCommand(CommandTerm):
 
         # Accumulate with OR so gate passes at any physics sub-step are captured.
         # (With decimation=4, overwriting would discard ~75% of real gate passes.)
-        just_passed = passed_gate_plane & (
-            torch.all(torch.abs(self.robot.data.root_pos_w - self.next_gate_w[:, :3]) < (self.gate_size / 2), dim=1)
+        # Gate-frame opening check (mirrors rewards.gate_passed): transform the drone position
+        # into the gate frame and bound the in-plane (local y, z) offset. The old world-axis bbox
+        # mis-scored passes through the yaw-rotated 225° gate. local x = through-normal direction,
+        # already captured by passed_gate_plane.
+        rel_gate, _ = math_utils.subtract_frame_transforms(
+            self.next_gate_w[:, :3], self.next_gate_w[:, 3:7], self.robot.data.root_pos_w
         )
-        just_missed = passed_gate_plane & (
-            torch.any(torch.abs(self.robot.data.root_pos_w - self.next_gate_w[:, :3]) > (self.gate_size / 2), dim=1)
-        )
+        half = self.gate_size / 2
+        in_gate = (rel_gate[:, 1].abs() < half) & (rel_gate[:, 2].abs() < half)
+        just_passed = passed_gate_plane & in_gate
+        just_missed = passed_gate_plane & ~in_gate
         self._gate_passed_accum |= just_passed
         self._gate_missed_accum |= just_missed
         # Keep _gate_passed/_gate_missed as current-sub-step for internal counter update

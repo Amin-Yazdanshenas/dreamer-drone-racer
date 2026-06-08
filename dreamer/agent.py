@@ -34,7 +34,7 @@ class DreamerConfig:
     # Observation
     obs_mode: str = "rgb"
     image_channels: int = 3
-    state_dim: int = 13
+    state_dim: int = 16   # ang_vel(3)+quat(4)+lin_vel(3)+target_pos_b(3)+gate_normal_b(3)
     action_dim: int = 4
 
     # CNN encoder

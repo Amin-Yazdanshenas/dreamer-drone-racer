@@ -10,7 +10,7 @@
 
 obs_mode: rgb
 image_channels: 3       # overridden per obs-mode yaml
-state_dim: 13           # ang_vel(3) + quat(4) + lin_vel(3) + target_pos_b(3)
+state_dim: 16           # ang_vel(3) + quat(4) + lin_vel(3) + target_pos_b(3) + gate_normal_b(3)
 action_dim: 4
 
 # ----- RSSM (faithful R2-Dreamer port: h_dim=2048, hidden=768, stoch=32, discrete=32) -----

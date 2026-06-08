@@ -23,8 +23,8 @@ class DreamerIsaacEnvWrapper:
         "mask"     : (N, H, W, 1) uint8 binary gate mask (0 or 255)
         "rgb_mask" : (N, H, W, 4) uint8 RGB + gate mask concatenated
 
-    State vector (13-dim float32):
-        ang_vel_b (3) + quat_w (4) + lin_vel_b (3) + target_pos_b (3)
+    State vector (16-dim float32):
+        ang_vel_b (3) + quat_w (4) + lin_vel_b (3) + target_pos_b (3) + gate_normal_b (3)
 
     Returned obs dict keys:
         image    : (N, H, W, C) uint8
@@ -147,12 +147,17 @@ class DreamerIsaacEnvWrapper:
         else:
             image = torch.cat([rgb_u8, mask_u8], dim=-1)   # (N, H, W, 4)
 
-        # --- State: ang_vel(3) + quat(4) + lin_vel(3) + target_pos_b(3) = 13 ---
+        # --- State: ang_vel(3) + quat(4) + lin_vel(3) + target_pos_b(3) + gate_normal_b(3) = 16 ---
         ang_vel = robot.data.root_ang_vel_b.cpu()           # (N, 3)
         quat = robot.data.root_quat_w.cpu()                 # (N, 4)
         lin_vel = robot.data.root_lin_vel_b.cpu()           # (N, 3)
         target_pb = _compute_target_pos_b(robot, isaac, self.command_name).cpu()  # (N, 3)
-        state = torch.cat([ang_vel, quat, lin_vel, target_pb], dim=-1).float()
+        # gate_normal_b: the gate's through-direction (local +x) expressed in the drone body
+        # frame. target_pos_b alone tells the actor WHERE the gate centre is, but not which way to
+        # CROSS it — for racing the correct action is to go through along the gate normal from the
+        # right side, not just reach the centre. Giving the actor the gate facing closes that gap.
+        gate_nb = _compute_gate_normal_b(robot, isaac, self.command_name).cpu()   # (N, 3)
+        state = torch.cat([ang_vel, quat, lin_vel, target_pb, gate_nb], dim=-1).float()
 
         # --- Privileged state for Informed-Dreamer decoder (12-dim) ---
         # Ground-truth signals the actor does NOT see but the WM decoder reconstructs.
@@ -263,6 +268,20 @@ def _compute_target_pos_b(robot, isaac_env, command_name: str) -> torch.Tensor:
         robot.data.root_pos_w, robot.data.root_quat_w, target_pos_w
     )
     return pos_b
+
+
+def _compute_gate_normal_b(robot, isaac_env, command_name: str) -> torch.Tensor:
+    """Compute the target gate's through-direction (gate local +x) in the drone body frame.
+
+    Returns (N, 3) unit-ish vector. Gives the actor the gate's facing/orientation, which
+    target_pos_b (centre direction) does not encode.
+    """
+    cmd = isaac_env.command_manager.get_term(command_name)
+    gate_quat_w = cmd.command[:, 3:7]                                  # (N, 4)
+    x_axis = torch.tensor([[1.0, 0.0, 0.0]], device=gate_quat_w.device).expand(gate_quat_w.shape[0], 3)
+    gate_x_w = math_utils.quat_apply(gate_quat_w, x_axis)             # gate normal in world
+    gate_x_b = math_utils.quat_apply_inverse(robot.data.root_quat_w, gate_x_w)  # in body frame
+    return gate_x_b
 
 
 def _compute_priv_state(robot, isaac_env, command_name: str) -> torch.Tensor:

@@ -144,13 +144,19 @@ def gate_passed(
     proj_new = (rel_new * gate_normal).sum(dim=-1)
     crossing = (proj_old < 0) & (proj_new > 0)
 
-    abs_diff = torch.abs(cur_pos - gate_pos)
-    in_bbox = torch.all(abs_diff < half_size, dim=1)
-    out_bbox = torch.any(abs_diff > half_size, dim=1)
+    # Gate-frame opening check. Transform the drone position into the gate frame and bound the
+    # IN-PLANE (local y, z) offset against the opening half-size. The previous world-axis bbox
+    # (|dx|,|dy|,|dz| < half) is only correct for axis-aligned gates; the track has a yaw-rotated
+    # 225° gate (drone_racer_env_cfg.py gate "3"), for which the world cube does not match the
+    # rotated opening — a drone passing well off to the side could be counted as a pass and vice
+    # versa. local x is the through-normal direction (already handled by the plane `crossing`),
+    # so only y, z bound the opening.
+    rel_gate, _ = math_utils.subtract_frame_transforms(gate_pos, gate_quat, cur_pos)
+    in_gate = (rel_gate[:, 1].abs() < half_size) & (rel_gate[:, 2].abs() < half_size)
 
-    passed = crossing & in_bbox
+    passed = crossing & in_gate
     if penalize_miss:
-        missed = crossing & out_bbox & ~passed
+        missed = crossing & ~in_gate
         return passed.float() - missed.float()
     return passed.float()
 
