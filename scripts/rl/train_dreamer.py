@@ -264,9 +264,15 @@ def main():
     # averages >= ADVANCE_THRESHOLD gates/episode at the current alpha.
     cmd_term = env._isaac.command_manager.get_term(env.command_name)
     ALPHA_STAGES = [0.9, 0.7, 0.5, 0.3, 0.1]
-    ADVANCE_THRESHOLD = 0.6          # mean gates/episode over the window to advance
-    STAGE_WINDOW = 300               # rolling episodes considered
-    MIN_EPISODES_PER_STAGE = 300     # don't advance before this many episodes at the stage
+    # ADVANCE_THRESHOLD lowered 0.6 -> 0.4. The first curriculum run peaked at ~0.50
+    # gates/episode at spawn 0.9 and never reached 0.6, so the curriculum NEVER engaged
+    # (spawn_lerp_alpha sat at 0.9 for 1.33M steps — effectively the static run). Set the
+    # advance bar below the achievable plateau so the curriculum actually anneals the spawn
+    # distance as the drone succeeds; ~0.4 gates/ep means roughly 40% of episodes clear a gate
+    # at the current distance, enough signal to push the drone a stage further back.
+    ADVANCE_THRESHOLD = 0.4          # mean gates/episode over the window to advance
+    STAGE_WINDOW = 200               # rolling episodes considered
+    MIN_EPISODES_PER_STAGE = 200     # don't advance before this many episodes at the stage
     use_curriculum = not args_cli.no_curriculum
     stage_idx = 0
     recent_gates: deque = deque(maxlen=STAGE_WINDOW)
