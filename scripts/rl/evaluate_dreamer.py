@@ -172,17 +172,14 @@ def main():
 
         ep_reward += obs["reward"].sum().item()
         ep_length += 1
+        # Count actual gate passes from the env wrapper's per-step signal — the SAME signal the
+        # training loop uses (ep_gates += next_obs["gate_passed"]). The previous code read
+        # extras["metrics"]["gates_passed_episode"], a key that does not exist (the command term
+        # writes extras["episode"]["Episode/gates_per_episode"]), so the lookup always missed and
+        # gates was reported as 0 even when the drone threaded gates.
+        ep_gates += float(obs["gate_passed"].sum().item())
 
         if obs["is_last"].any():
-            # Extract gate count from env info if available
-            try:
-                gates = env._isaac.extras.get("metrics", {}).get("gates_passed_episode", 0)
-                if hasattr(gates, "item"):
-                    gates = float(gates.mean().item())
-                ep_gates = float(gates)
-            except Exception:
-                ep_gates = 0.0
-
             results.append({
                 "episode": episodes_done + 1,
                 "reward": ep_reward,
