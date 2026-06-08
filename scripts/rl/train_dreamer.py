@@ -263,7 +263,11 @@ def main():
     # approaches. Advance to the next (lower) alpha once a rolling window of recent episodes
     # averages >= ADVANCE_THRESHOLD gates/episode at the current alpha.
     cmd_term = env._isaac.command_manager.get_term(env.command_name)
-    ALPHA_STAGES = [0.9, 0.7, 0.5, 0.3, 0.1]
+    # Finer stages. The first engaged curriculum run advanced 0.9 -> 0.7 then collapsed: the
+    # 1 m -> 3 m jump in approach distance was too large, the drone couldn't navigate it, gates
+    # went to 0 and the value collapsed (-23). Smaller steps let it master each incremental
+    # approach distance before the next.
+    ALPHA_STAGES = [0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.4, 0.3, 0.2]
     # ADVANCE_THRESHOLD lowered 0.6 -> 0.4. The first curriculum run peaked at ~0.50
     # gates/episode at spawn 0.9 and never reached 0.6, so the curriculum NEVER engaged
     # (spawn_lerp_alpha sat at 0.9 for 1.33M steps — effectively the static run). Set the
