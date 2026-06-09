@@ -64,9 +64,16 @@ class DroneRacerSceneCfg(InteractiveSceneCfg):
         debug_vis=False,
     )
     imu = ImuCfg(prim_path="{ENV_REGEX_NS}/Robot/body", debug_vis=False)
+    # Camera tilted ~30° UP (rot = quat 30° about body -Y). A level camera (rot identity)
+    # pitched down with the drone when it accelerated forward, dropping the target gate out of
+    # the top of the frame — dump_fpv measured the target gate visible in only 15% of frames and
+    # the drone crashed after gate 1 because it flew blind toward gate 2. Real FPV racing drones
+    # mount the camera tilted up 20-45° for exactly this reason. (w,x,y,z) = (cos15°,0,-sin15°,0).
+    # VERIFY DIRECTION: re-run scripts/rl/dump_fpv.py — gate-visible % should rise well above 15%;
+    # if it drops, flip the sign of the y component to +0.2588.
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/body/camera",
-        offset=TiledCameraCfg.OffsetCfg(pos=(0.14, 0.0, 0.05), rot=(1.0, 0.0, 0.0, 0.0), convention="world"),
+        offset=TiledCameraCfg.OffsetCfg(pos=(0.14, 0.0, 0.05), rot=(0.9659, 0.0, -0.2588, 0.0), convention="world"),
         data_types=["semantic_segmentation"],
         colorize_semantic_segmentation=False,
         spawn=sim_utils.PinholeCameraCfg(),
@@ -709,7 +716,20 @@ class DroneRacerEnvCfg_Dreamer_PLAY(ManagerBasedRLEnvCfg):
         self.commands.target.debug_vis = True
         self.commands.target.target_visualizer_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
         self.commands.target.drone_visualizer_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
-        self.decimation = 4
+        # CRITICAL: eval MUST match the training spawn + control timescale, or the policy is
+        # tested out-of-distribution and looks broken even when it isn't.
+        #   - reset_base=None + randomise_start=True + curriculum spawn (was: fixed far-corner
+        #     reset_base + randomise_start=None, so eval dropped the drone at a corner targeting
+        #     gate 0 — an init the policy never trained on -> 0 gates in eval despite ~30% in
+        #     training).
+        #   - spawn_lerp_alpha=0.2 matches where the training curriculum ended (full-segment
+        #     approach). Raise toward 0.9 to eval the easier near-gate starts the policy also saw.
+        #   - decimation=12 matches training (was 4 -> the policy re-decided every 0.01 s in eval
+        #     vs 0.03 s in training; the action timescale mismatch alone breaks behaviour).
+        self.events.reset_base = None
+        self.commands.target.randomise_start = True
+        self.commands.target.spawn_lerp_alpha = 0.2
+        self.decimation = 12
         self.episode_length_s = 20
         self.viewer.eye = (-10.0, -10.0, 10.0)
         self.viewer.lookat = (0.0, 0.0, 0.0)
