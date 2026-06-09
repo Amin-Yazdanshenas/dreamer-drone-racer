@@ -288,9 +288,15 @@ class TerminationsCfg:
     """Termination terms for the MDP."""
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    # flyaway distance 50 m so a single overshoot doesn't immediately terminate Dreamer's
-    # under-trained policy. Legacy PPO restores 20 m via LegacyTerminationsCfg.
-    flyaway = DoneTerm(func=mdp.flyaway, params={"command_name": "target", "distance": 50.0})
+    # flyaway distance 50 -> 15 m. A drone that drifts off after passing a gate used to survive
+    # up to 50 m away, accruing a long negative-drift episode (signed progress goes negative every
+    # step it isn't closing). Those long-negative episodes are what inflated the return
+    # distribution: return/scale blew up to ~60 and imag/value collapsed to ~-28, washing out the
+    # dense signal and capping the actor at a reliable 1-gate-then-crash policy that can't learn
+    # the gate-1 -> gate-2 transition. Terminating drift at 15 m bounds the negative tail (one
+    # fixed -20 crash penalty instead of a long accumulation), settling the normaliser so the
+    # actor can learn multi-gate sequences. Legacy PPO uses 20 m via LegacyTerminationsCfg.
+    flyaway = DoneTerm(func=mdp.flyaway, params={"command_name": "target", "distance": 15.0})
     # Collision threshold 10 N: above Sim 5.1 ContactSensor phantom (~76 N pre-mass-fix,
     # residual <10 N post-fix). DroneRacerSceneCfg.collision_sensor.force_threshold=10
     # already zeroes the buffered force below this floor.
