@@ -1,18 +1,20 @@
 {
   "effort": "downshifted to high",
   "phase": 2,
+  "status": "COMPLETE — 5 iterations done; see loop_report.md",
   "audit_commit": "c3e0716",
   "remote": { "host": "<REDACTED_HOST>", "user": "<REDACTED_USER>", "workdir": "~/dreamer-drone-racer", "gpu": "RTX 4090 24GB",
-    "launch_note": "conda NOT on non-interactive PATH. Launch: `setsid bash ~/dreamer-drone-racer/_launch_iter.sh <steps> >/dev/null 2>&1 </dev/null &` after `git fetch origin -q && git reset --hard origin/master -q`. Poll run.log; rsync newest logs dir tensorboard on completion." },
-  "config_state": { "gate_passed_weight": 500, "flyaway_m": 15.0, "horizon": 333, "imag_horizon": 24, "decimation": 12, "progress_weight": 50, "progress_asymmetric": false },
-  "key_finding": "Reward-magnitude + discount knobs cannot fix the symptoms. gate halve (1000->500) = the ONE durable win (return/scale ~25% lower, no gate cost). flyaway tighten (15->12) = WORSE on both. horizon cut (333->150) = lifted value (-16.6->-9.6) but HURT gates (0.44->0.18). Root cause = imagination horizon (0.45s) << gate distance (~2s) + net-negative dense reward; not in the user's intervention list. iter5 tests the real root-cause lever: imag_horizon 15->24 (compute-only, low-risk).",
+    "launch_note": "conda NOT on non-interactive PATH. Launch: `setsid bash ~/dreamer-drone-racer/_launch_iter.sh <steps> >/dev/null 2>&1 </dev/null &` after `git fetch origin -q && git reset --hard origin/master -q`." },
+  "final_config": { "gate_passed_weight": 500, "flyaway_m": 15.0, "horizon": 333, "imag_horizon": 15, "decimation": 12, "progress_weight": 50, "progress_asymmetric": false },
+  "durable_win": "gate_passed 1000->500 (return/scale ~25% lower, no gate cost). All other levers reverted (neutral/harmful).",
+  "headline": "max-2-gate ceiling is INVARIANT across every lever; symptoms are reward+horizon geometry, not bugs (Phase 1) and not tunable. 3+ chaining needs structural work: WM multi-gate fidelity, deterministic-policy sharpness, dense-reward sign, or decimation 16-24.",
   "max_iterations": 5,
   "current_iteration": 5,
-  "status": "iter5 launching 800k @ imag_horizon=24 (horizon reverted to 333; gate=500, fly=15). FINAL experiment: does longer imagination unlock chaining? Compare gates_mean50/max + return/scale + value to iter2 baseline (gate500/fly15/horizon333/imag15: rs=33, val=-16.6, gates=0.44).",
   "iterations": [
-    { "iter": 1, "run_steps": 200000, "signals": { "return_scale": 9.3, "value": -3.5, "gates_max": 1 }, "intervention": "gate 1000->500", "commit": "b183c02" },
-    { "iter": 2, "run_dir": "2026-06-09_23-17-20", "run_steps": 800000, "traj": { "return_scale_800k": 33.0, "value_800k": -16.6, "gates_mean50": 0.44, "gates_max": 2 }, "result": "gate halve cut return/scale ~25%; best gates of the loop", "intervention": "flyaway 15->12", "commit": "d3e9452" },
-    { "iter": 3, "run_dir": "2026-06-10_00-15-45", "run_steps": 800000, "traj": { "return_scale_800k": 37.2, "value_800k": -14.6, "gates_mean50": 0.28 }, "result": "flyaway WORSE on both; reverted to 15", "intervention": "horizon 333->150", "commit": "693843e" },
-    { "iter": 4, "run_dir": "2026-06-10_01-55-09", "run_steps": 800000, "traj": { "return_scale_800k": 32.6, "value_800k": -9.6, "gates_mean50": 0.18 }, "result": "horizon cut lifted value but HURT gates; reverted to 333", "intervention": "imag_horizon 15->24 (root-cause lever)", "commit": "pending" }
+    { "iter": 1, "run_steps": 200000, "signals": { "return_scale": 9.3, "value": -3.5, "gates_max": 1 }, "intervention": "gate 1000->500 (KEPT)", "commit": "b183c02" },
+    { "iter": 2, "run_dir": "2026-06-09_23-17-20", "traj": { "return_scale_800k": 33.0, "value_800k": -16.6, "gates_mean50": 0.44, "gates_max": 2 }, "intervention": "flyaway 15->12", "commit": "d3e9452" },
+    { "iter": 3, "run_dir": "2026-06-10_00-15-45", "traj": { "return_scale_800k": 37.2, "value_800k": -14.6, "gates_mean50": 0.28 }, "result": "WORSE both; reverted", "intervention": "horizon 333->150", "commit": "693843e" },
+    { "iter": 4, "run_dir": "2026-06-10_01-55-09", "traj": { "return_scale_800k": 32.6, "value_800k": -9.6, "gates_mean50": 0.18 }, "result": "value up, gates down; reverted", "intervention": "imag_horizon 15->24", "commit": "5d20afb" },
+    { "iter": 5, "run_dir": "2026-06-10_03-34-31", "traj": { "return_scale_800k": 26.7, "value_800k": -32.2, "gates_mean50": 0.40, "alpha_800k": 0.3 }, "result": "return/scale down + faster anneal but value collapsed deeper; chaining unchanged (max 2); reverted imag->15", "intervention": "NONE — loop concluded", "commit": "this" }
   ]
 }
