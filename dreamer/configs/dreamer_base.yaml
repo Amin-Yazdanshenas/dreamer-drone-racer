@@ -67,13 +67,16 @@ loss_scale_decoder: 1.0
 # could never imagine reaching a gate — it only optimised 0.1 s of net-negative dense reward
 # and the bootstrapped value collapsed. (It was temporarily dropped to 10 to fight a return
 # inflation that turned out to be the C1 lambda-return bug, since fixed.)
-imag_horizon: 15
-horizon: 150            # Phase-2 iter4: 333 -> 150 (gamma 0.997 -> 0.993). At decimation=12 the
-                        # 333-step horizon was ~10 s of discount; over a net-negative dense reward
-                        # the value integrates ~-0.085/step x horizon, collapsing imag/value to ~-28
-                        # at scale. 150 steps = 4.5 s still covers ~2 gates ahead but ~halves the
-                        # integrated-negative depth; should lift value AND tighten the imagined
-                        # return spread (less-collapsed V(s_H) bootstrap -> lower return/scale).
+imag_horizon: 24        # Phase-2 iter5: 15 -> 24. At decimation=12 (dt 0.03 s) imagination now
+                        # covers 24 * 0.03 = 0.72 s of flight (was 0.45 s). The root cause of the
+                        # value collapse + gate stall is imagination horizon << gate-to-gate flight
+                        # (~2 s at low alpha): the actor can't imagine reaching the next gate so it
+                        # optimises only near-term net-negative dense reward. Longer imagination is
+                        # the direct (low-risk: compute-only, no env/control change) lever. Tests
+                        # whether more planning reach unlocks multi-gate chaining.
+horizon: 333            # reverted iter4's 150 -> 333: the shorter discount lifted value modestly
+                        # (-16.6 -> -9.6) but HURT gate-passing (0.44 -> 0.18 mean) by cutting
+                        # foresight. 333 (gamma 0.997) is the best-for-gates setting.
 lam: 0.95
 entropy_scale: 3.0e-3   # 10x paper: bare 3e-4 collapsed policy in earlier runs
 entropy_min: 1.0        # entropy floor (nats)
