@@ -67,11 +67,14 @@ loss_scale_decoder: 1.0
 # could never imagine reaching a gate — it only optimised 0.1 s of net-negative dense reward
 # and the bootstrapped value collapsed. (It was temporarily dropped to 10 to fight a return
 # inflation that turned out to be the C1 lambda-return bug, since fixed.)
-imag_horizon: 15        # DreamerV3 default. Phase-2 iter5 tested 24 (0.72s imagination): it cut
-                        # return/scale (33->27) and annealed the curriculum faster, but DEEPENED the
-                        # value collapse (-16.6 -> -32, more net-negative dense reward integrated)
-                        # and did NOT unlock chaining (still max 2 gates). Reverted to 15 — it has
-                        # better value AND the best gate-passing (mean 0.44) of the loop.
+imag_horizon: 24        # 15 -> 24 REINSTATED after post-loop equal-alpha re-analysis. The iter5
+                        # revert was a curriculum-confound error: comparing gates/ep at the 800k
+                        # readout ignored that iter5 had annealed to alpha 0.3 while iter2 sat at
+                        # 0.55. At EQUAL alpha, imag=24 passed better at every stage (0.44 vs 0.23
+                        # @0.85; 0.47 vs 0.29 @0.75; 0.40 vs 0.25 @0.6) and advanced stages in ~5k
+                        # steps that took imag=15 100k+. 24 * 0.03 s = 0.72 s imagination reach.
+                        # The deeper imag/value (-32) it showed was the suicide-gradient pathology,
+                        # now fixed by the terminating dt-scaling correction (-1000 -> -30/crash).
 horizon: 333            # gamma 0.997. iter4 tested 150: lifted value (-16.6->-9.6) but HURT gates
                         # (0.44->0.18) by cutting foresight. 333 is the best-for-gates setting.
 lam: 0.95

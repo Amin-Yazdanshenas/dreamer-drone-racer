@@ -222,10 +222,16 @@ class RewardsCfg:
     # - progress weight 10, asymmetric clamp (no negative progress reward)
     # - gate_passed 10000: dt-scales to +100 per pass (10× bigger than max drift reward)
     # - lookat_next kept small
-    # terminating -2 -> -20: with signed progress, -2 (=-0.02/crash after dt) was too cheap —
-    # early runs suicided (crash instantly to stop the negative dense reward), later runs drifted.
-    # -20 (=-0.2/crash) deters crash-escape without the -500/-0.02-dominates-everything extreme.
-    terminating = RewTerm(func=mdp.is_terminated, weight=-20.0)
+    # terminating -20 -> -1000 (death-penalty dt-scaling fix, post-Phase-2 review). Isaac Lab
+    # multiplies every reward term by dt (now 0.03 s at decimation=12), so sparse penalties need
+    # weight ~= desired_spike / dt — the same arithmetic applied to gate_passed but never to this
+    # term. -20 delivered only -0.6/crash while imag/value sat at -16..-32: in imagination a
+    # crashing state (target ~ -0.6, future zeroed by the continuation weight) beat a continuing
+    # state (target ~ V ~ -16) by ~+15 — the lambda targets literally rewarded dying, which is the
+    # crash-after-pass mechanism behind the 2-gate ceiling and 100% eval collisions. -1000 ->
+    # -30/crash makes death strictly worse than the worst observed continuation (|V| <= ~32), so
+    # surviving always dominates crashing.
+    terminating = RewTerm(func=mdp.is_terminated, weight=-1000.0)
     # Dialled back to -0.02 after the -0.05 run showed catastrophic instability:
     # episode_length swung 1 -> 340 -> 66 RL steps, episode_reward swung -0.06 -> -2.44 -> +3.76,
     # return/scale escalated to +6.06 (vs +4.25 at -0.01). The actor briefly mastered a 3.4s
