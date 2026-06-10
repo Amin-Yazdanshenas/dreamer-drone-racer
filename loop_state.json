@@ -13,8 +13,8 @@
   "config_state": { "gate_passed_weight": 500, "flyaway_m": 15.0, "horizon": 333, "decimation": 12 },
   "key_finding": "200k runs are PRE-SYMPTOM: at 200k return/scale=9, value=-3.5 (healthy); the 50/-28 symptoms only emerge after ~1M (5M run showed onset ~600k). So the signal-rule on 200k snapshots only ever fires episode_gates<3 -> degenerate flyaway-only loop. Reading the signal through the full-run trajectory instead: return/scale DOES exceed 20 at scale, caused by the +30 gate spike -> applied intervention 1 (gate spike halve) in iter1. Iter2+ use longer runs (>=800k) to actually surface + validate the symptom.",
   "max_iterations": 5,
-  "current_iteration": 1,
-  "status": "iter1_done_applied_gatespike_halve; iter2 launching 800k validation",
+  "current_iteration": 2,
+  "status": "iter2_RUNNING_800k @ b183c02 (gate_passed=500); poll remote run.log; on completion rsync run dir + read return/scale (target<25 onset), value_mean, episode_gates max. Launch cmd: `setsid bash ~/dreamer-drone-racer/_launch_iter.sh <steps> >/dev/null 2>&1 </dev/null &`",
   "iterations": [
     {
       "iter": 1,
