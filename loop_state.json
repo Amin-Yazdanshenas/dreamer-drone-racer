@@ -1,32 +1,25 @@
 {
   "effort": "downshifted to high",
-  "reason": "audit complete, entering loop",
   "phase": 2,
   "audit_commit": "c3e0716",
   "remote": { "host": "<REDACTED_HOST>", "user": "<REDACTED_USER>", "workdir": "~/dreamer-drone-racer", "gpu": "RTX 4090 24GB",
-    "launch_note": "conda NOT on non-interactive PATH. Launch via remote script: `setsid bash ~/dreamer-drone-racer/_launch_iter.sh <steps> >/dev/null 2>&1 </dev/null &`. Poll run.log; rsync newest logs dir tensorboard on completion." },
-  "interventions_priority": [
-    "return_scale>20 -> halve gate_passed weight",
-    "value_mean<-10 -> AUDIT: value target verified correct (no clip bug); real lever is net-negative dense reward / horizon",
-    "episode_gates<3 -> tighten flyaway distance"
-  ],
-  "config_state": { "gate_passed_weight": 500, "flyaway_m": 12.0, "horizon": 333, "decimation": 12, "progress_weight": 50, "progress_asymmetric": false },
-  "key_finding": "200k runs are PRE-SYMPTOM (return/scale=9, value=-3.5). Symptoms emerge ~400-600k. Use >=800k runs. return/scale inflation is dominated by the NEGATIVE drift tail (p5), not the positive gate spike; halving the spike helped only ~25%. Root cause (imagination horizon 0.45s << gate distance ~2s at low alpha + net-negative dense reward) is NOT in the tunable list; the knobs have limited headroom.",
+    "launch_note": "conda NOT on non-interactive PATH. Launch: `setsid bash ~/dreamer-drone-racer/_launch_iter.sh <steps> >/dev/null 2>&1 </dev/null &` after `git fetch origin -q && git reset --hard origin/master -q`. Poll run.log; rsync newest logs dir tensorboard on completion." },
+  "config_state": { "gate_passed_weight": 500, "flyaway_m": 15.0, "horizon": 150, "decimation": 12, "progress_weight": 50, "progress_asymmetric": false },
+  "key_finding": "Reward-magnitude knobs (gate spike, flyaway) do NOT fix return/scale or value collapse. return/scale is the spread of IMAGINED lambda-returns (value landscape), driven by net-negative dense reward integrated over the gamma-horizon + imagination-horizon(0.45s)<<gate-distance(2s). gate halve helped ~25%; flyaway tightening made it WORSE (37 vs 33). The real lever is the discount horizon (F1) and/or the dense-reward sign. Root cause is structural (not in the user's intervention list).",
   "max_iterations": 5,
-  "current_iteration": 3,
-  "status": "iter3 launching 800k @ flyaway=12 (gate=500). On completion: rsync 2026-... newest dir, read return/scale traj (target settle <25), value, gates max.",
+  "current_iteration": 4,
+  "status": "iter4 launching 800k @ horizon=150 (reverted flyaway 12->15 since iter3 was worse; gate=500). On completion read return/scale + value trajectory; compare to iter2 (flyaway15/horizon333: rs=33,val=-16.6 @800k).",
   "iterations": [
-    {
-      "iter": 1, "run_dir": "2026-09_22-44-41", "run_steps": 200000,
-      "signals": { "return_scale": 9.3, "value_mean": -3.5, "gates_max": 1, "gates_mean50": 0.24, "alpha": 0.85 },
-      "rule_outcome": "200k pre-symptom; only gates<3 fires",
-      "intervention": "halve gate_passed 1000->500 (best-call from full-run evidence)", "commit": "b183c02"
-    },
-    {
-      "iter": 2, "run_dir": "2026-06-09_23-17-20", "run_steps": 800000,
-      "signals_traj": { "return_scale": {"200k":9.4,"400k":24.5,"600k":29.9,"800k":33.0}, "value_mean": {"200k":-3.9,"400k":-11.5,"600k":-10.3,"800k":-16.6}, "gates_max":2, "gates_mean50":0.44, "alpha_800k":0.55 },
-      "result": "gate halve reduced return/scale ~25% (30 vs prior ~38 @600k) but STILL climbs >25; negative drift tail dominates; value still collapsing; gates cap at 2",
-      "intervention": "iter3: tighten flyaway 15->12 (bound negative tail; one variable)", "commit": "pending"
-    }
+    { "iter": 1, "run_dir": "2026-09_22-44-41", "run_steps": 200000,
+      "signals": { "return_scale": 9.3, "value_mean": -3.5, "gates_max": 1, "alpha": 0.85 },
+      "intervention": "halve gate_passed 1000->500", "commit": "b183c02" },
+    { "iter": 2, "run_dir": "2026-06-09_23-17-20", "run_steps": 800000,
+      "traj": { "return_scale": {"200k":9.4,"600k":29.9,"800k":33.0}, "value": {"600k":-10.3,"800k":-16.6}, "gates_max":2, "gates_mean50":0.44 },
+      "result": "gate halve cut return/scale ~25% vs prior but still climbs >25; negative tail dominates",
+      "intervention": "flyaway 15->12", "commit": "d3e9452" },
+    { "iter": 3, "run_dir": "2026-06-10_00-15-45", "run_steps": 800000,
+      "traj": { "return_scale": {"200k":7.8,"600k":35.8,"800k":37.2}, "value": {"600k":-13.5,"800k":-14.6}, "gates_max":2, "gates_mean50":0.28 },
+      "result": "flyaway 12 made return/scale WORSE (37 vs 33) + gates worse (0.28 vs 0.44). Flyaway is the wrong lever for imagined-return spread. REVERTED to 15.",
+      "intervention": "revert flyaway->15 + horizon 333->150 (value lever F1)", "commit": "pending" }
   ]
 }

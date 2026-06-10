@@ -298,7 +298,7 @@ class TerminationsCfg:
     # the gate-1 -> gate-2 transition. Terminating drift at 15 m bounds the negative tail (one
     # fixed -20 crash penalty instead of a long accumulation), settling the normaliser so the
     # actor can learn multi-gate sequences. Legacy PPO uses 20 m via LegacyTerminationsCfg.
-    flyaway = DoneTerm(func=mdp.flyaway, params={"command_name": "target", "distance": 12.0})
+    flyaway = DoneTerm(func=mdp.flyaway, params={"command_name": "target", "distance": 15.0})
     # Collision threshold 10 N: above Sim 5.1 ContactSensor phantom (~76 N pre-mass-fix,
     # residual <10 N post-fix). DroneRacerSceneCfg.collision_sensor.force_threshold=10
     # already zeroes the buffered force below this floor.

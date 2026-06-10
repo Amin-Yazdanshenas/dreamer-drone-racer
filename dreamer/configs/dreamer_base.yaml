@@ -68,7 +68,12 @@ loss_scale_decoder: 1.0
 # and the bootstrapped value collapsed. (It was temporarily dropped to 10 to fight a return
 # inflation that turned out to be the C1 lambda-return bug, since fixed.)
 imag_horizon: 15
-horizon: 333            # discount horizon → gamma = 1 - 1/333 ≈ 0.997 (= 10 s at the 33 Hz rate)
+horizon: 150            # Phase-2 iter4: 333 -> 150 (gamma 0.997 -> 0.993). At decimation=12 the
+                        # 333-step horizon was ~10 s of discount; over a net-negative dense reward
+                        # the value integrates ~-0.085/step x horizon, collapsing imag/value to ~-28
+                        # at scale. 150 steps = 4.5 s still covers ~2 gates ahead but ~halves the
+                        # integrated-negative depth; should lift value AND tighten the imagined
+                        # return spread (less-collapsed V(s_H) bootstrap -> lower return/scale).
 lam: 0.95
 entropy_scale: 3.0e-3   # 10x paper: bare 3e-4 collapsed policy in earlier runs
 entropy_min: 1.0        # entropy floor (nats)
