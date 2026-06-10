@@ -1,0 +1,18 @@
+{
+  "effort": "downshifted to high",
+  "reason": "audit complete, entering loop",
+  "phase": 2,
+  "audit_commit": "c3e0716",
+  "remote": { "host": "<REDACTED_HOST>", "user": "<REDACTED_USER>", "workdir": "~/dreamer-drone-racer", "gpu": "RTX 4090 24GB" },
+  "interventions_priority": [
+    "return_scale>20 -> halve gate_passed weight (1000->500->...)",
+    "value_mean<-10 -> AUDIT: value target verified correct (no clip bug); fall through (optional horizon 333->150)",
+    "episode_gates<3 -> tighten flyaway distance by 10%"
+  ],
+  "config_state": { "gate_passed_weight": 1000, "flyaway_m": 15.0, "horizon": 333, "decimation": 12 },
+  "baseline_5M_signals": { "return_scale": 50, "value_mean": -28, "episode_gates_max": 2, "note": "from run 2026-06-09_00-11-51 at 5M; 200k runs will read EARLY-curriculum values (alpha~0.8), not converged" },
+  "max_iterations": 5,
+  "iterations": [],
+  "current_iteration": 0,
+  "status": "phase1_done_launching_iter1"
+}
