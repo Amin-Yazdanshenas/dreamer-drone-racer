@@ -3,16 +3,27 @@
   "reason": "audit complete, entering loop",
   "phase": 2,
   "audit_commit": "c3e0716",
-  "remote": { "host": "<REDACTED_HOST>", "user": "<REDACTED_USER>", "workdir": "~/dreamer-drone-racer", "gpu": "RTX 4090 24GB" },
+  "remote": { "host": "<REDACTED_HOST>", "user": "<REDACTED_USER>", "workdir": "~/dreamer-drone-racer", "gpu": "RTX 4090 24GB",
+    "launch_note": "conda NOT on non-interactive PATH; use `source ~/miniconda3/etc/profile.d/conda.sh && conda activate isaacsim`; launch with `setsid bash -c '... > ~/dreamer-drone-racer/run.log 2>&1' < /dev/null &`" },
   "interventions_priority": [
-    "return_scale>20 -> halve gate_passed weight (1000->500->...)",
-    "value_mean<-10 -> AUDIT: value target verified correct (no clip bug); fall through (optional horizon 333->150)",
+    "return_scale>20 -> halve gate_passed weight",
+    "value_mean<-10 -> AUDIT: value target verified correct (no clip bug); fall through / horizon lever",
     "episode_gates<3 -> tighten flyaway distance by 10%"
   ],
-  "config_state": { "gate_passed_weight": 1000, "flyaway_m": 15.0, "horizon": 333, "decimation": 12 },
-  "baseline_5M_signals": { "return_scale": 50, "value_mean": -28, "episode_gates_max": 2, "note": "from run 2026-06-09_00-11-51 at 5M; 200k runs will read EARLY-curriculum values (alpha~0.8), not converged" },
+  "config_state": { "gate_passed_weight": 500, "flyaway_m": 15.0, "horizon": 333, "decimation": 12 },
+  "key_finding": "200k runs are PRE-SYMPTOM: at 200k return/scale=9, value=-3.5 (healthy); the 50/-28 symptoms only emerge after ~1M (5M run showed onset ~600k). So the signal-rule on 200k snapshots only ever fires episode_gates<3 -> degenerate flyaway-only loop. Reading the signal through the full-run trajectory instead: return/scale DOES exceed 20 at scale, caused by the +30 gate spike -> applied intervention 1 (gate spike halve) in iter1. Iter2+ use longer runs (>=800k) to actually surface + validate the symptom.",
   "max_iterations": 5,
-  "iterations": [],
-  "current_iteration": 0,
-  "status": "phase1_done_launching_iter1"
+  "current_iteration": 1,
+  "status": "iter1_done_applied_gatespike_halve; iter2 launching 800k validation",
+  "iterations": [
+    {
+      "iter": 1,
+      "run_dir": "2026-06-09_22-44-41",
+      "run_steps": 200000,
+      "signals": { "return_scale_last": 9.26, "return_scale_mean30": 5.11, "value_mean_last": -3.46, "value_mean_mean30": -1.48, "episode_gates_max": 1.0, "episode_gates_mean50": 0.24, "alpha": 0.85 },
+      "rule_outcome": "only episode_gates<3 fires at 200k (others pre-symptom)",
+      "best_call_intervention": "halve gate_passed 1000->500 (+30->+15/pass) based on full-run evidence that return/scale hits 50 at scale; kept flyaway at 15 (already tightened from 50 last session, marginal at 200k)",
+      "commit": "pending"
+    }
+  ]
 }

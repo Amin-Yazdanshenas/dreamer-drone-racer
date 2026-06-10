@@ -255,15 +255,17 @@ class RewardsCfg:
         weight=50.0,
         params={"command_name": "target", "asymmetric": False},
     )
-    # gate_passed 10000 -> 1000 (dt-scales to +10/pass, was +100). The +100 spike was 25x the
-    # PPO baseline (+4) and 25x larger than 4 s of any dense reward; mixed with the negative
-    # drift returns it inflated the ReturnEMA percentile spread (return/scale blew up to ~20),
-    # which washed out the dense signal and destabilised the actor's normalised targets, driving
-    # the recurring value collapse + behaviour regression. +10/pass is still clearly the dominant
-    # positive (10x a strong dense step) without dominating the return distribution.
+    # gate_passed 1000 -> 500 (Phase-2 loop iter1). With decimation=12 (dt=0.03) the weight
+    # dt-scales to the per-pass spike: 1000 -> +30/pass, now 500 -> +15/pass. The completed 5M run
+    # (2026-06-09_00-11-51) showed return/scale inflating to ~50 and imag/value collapsing to -28
+    # at scale; the audit traced return/scale directly to the raw +30 spike in return space (the
+    # ReturnEMA p95-p5 spread). 200k snapshots are pre-symptom (return/scale ~9 there), so the
+    # halving is justified by the full-run trajectory, not the early snapshot. +15/pass is still
+    # the dominant positive (~15x a strong dense step) without stretching the return distribution
+    # as hard. Predicted effect: return/scale settles toward ~25 at scale, less actor destabilisation.
     gate_passed = RewTerm(
         func=mdp.gate_passed,
-        weight=1000.0,
+        weight=500.0,
         params={"command_name": "target", "penalize_miss": False},
     )
     lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.5, params={"command_name": "target", "std": 0.5})
