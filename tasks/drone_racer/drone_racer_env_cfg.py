@@ -275,18 +275,17 @@ class RewardsCfg:
         params={"command_name": "target", "penalize_miss": False},
     )
     lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.5, params={"command_name": "target", "std": 0.5})
-    # Crossing-precision shaping (enabled after the 5M post-fix run): the policy passes ~80% but
-    # ALWAYS crashes at/just past the gate — dump_fpv pre-crash frames show gate frame members
-    # filling the FPV at impact, i.e. it threads off-centre and clips. The pass bbox (±0.75 m)
-    # leaves only ~0.19 m to the frame (opening half ≈0.93 m), about one rotor radius, so
-    # edge-of-bbox passes collide. gate_offset_penalty is gate-frame-correct, active only within
-    # near_plane_dist along the gate normal, and pays NOTHING for proximity (no parking
-    # incentive) — it purely pushes the crossing toward the opening centre. dt-scaled effect at
-    # weight -2: ~-0.06 per metre of offset per step near the plane — gentle vs the +15 pass
-    # spike; raise if threading stays sloppy.
+    # gate_offset_penalty DISABLED after a controlled A/B at 5M. Enabled at -2 (run
+    # 2026-06-12_01-37-34, fixed env): stochastic pass rate fell 73% -> 50%, max chain 4 -> 3,
+    # imag/value went negative again (-8..-16 vs +2..+5.8) while the env bug fixes in the same
+    # run verifiably removed only spurious deaths — isolating the regression to this term. Same
+    # parking-wall lesson as near_gate: ANY dense negative concentrated around the gate plane
+    # disrupts the approach more than it improves threading. Keep weight 0; crossing precision
+    # has to come from the +pass spike and (if needed) a TIGHTER pass bbox (gate_size), not a
+    # plane-local penalty.
     gate_offset_penalty = RewTerm(
         func=mdp.gate_offset_penalty,
-        weight=-2.0,
+        weight=0.0,
         params={"command_name": "target", "near_plane_dist": 2.0},
     )
     # near_gate DISABLED (weight 0). This absolute-proximity term was the parking wall: it
