@@ -275,6 +275,20 @@ class RewardsCfg:
         params={"command_name": "target", "penalize_miss": False},
     )
     lookat_next = RewTerm(func=mdp.lookat_next_gate, weight=0.5, params={"command_name": "target", "std": 0.5})
+    # Crossing-precision shaping (enabled after the 5M post-fix run): the policy passes ~80% but
+    # ALWAYS crashes at/just past the gate — dump_fpv pre-crash frames show gate frame members
+    # filling the FPV at impact, i.e. it threads off-centre and clips. The pass bbox (±0.75 m)
+    # leaves only ~0.19 m to the frame (opening half ≈0.93 m), about one rotor radius, so
+    # edge-of-bbox passes collide. gate_offset_penalty is gate-frame-correct, active only within
+    # near_plane_dist along the gate normal, and pays NOTHING for proximity (no parking
+    # incentive) — it purely pushes the crossing toward the opening centre. dt-scaled effect at
+    # weight -2: ~-0.06 per metre of offset per step near the plane — gentle vs the +15 pass
+    # spike; raise if threading stays sloppy.
+    gate_offset_penalty = RewTerm(
+        func=mdp.gate_offset_penalty,
+        weight=-2.0,
+        params={"command_name": "target", "near_plane_dist": 2.0},
+    )
     # near_gate DISABLED (weight 0). This absolute-proximity term was the parking wall: it
     # rewards being CLOSE, but passing a gate switches the target to the next (far) gate, so the
     # reward collapses on passing — the dense landscape peaks just before the gate plane and
@@ -296,20 +310,24 @@ class TerminationsCfg:
     """Termination terms for the MDP."""
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    # flyaway distance 50 -> 15 m. A drone that drifts off after passing a gate used to survive
-    # up to 50 m away, accruing a long negative-drift episode (signed progress goes negative every
-    # step it isn't closing). Those long-negative episodes are what inflated the return
-    # distribution: return/scale blew up to ~60 and imag/value collapsed to ~-28, washing out the
-    # dense signal and capping the actor at a reliable 1-gate-then-crash policy that can't learn
-    # the gate-1 -> gate-2 transition. Terminating drift at 15 m bounds the negative tail (one
-    # fixed -20 crash penalty instead of a long accumulation), settling the normaliser so the
-    # actor can learn multi-gate sequences. Legacy PPO uses 20 m via LegacyTerminationsCfg.
-    flyaway = DoneTerm(func=mdp.flyaway, params={"command_name": "target", "distance": 15.0})
-    # Collision threshold 10 N: above Sim 5.1 ContactSensor phantom (~76 N pre-mass-fix,
-    # residual <10 N post-fix). DroneRacerSceneCfg.collision_sensor.force_threshold=10
-    # already zeroes the buffered force below this floor.
+    # flyaway 15 -> 18 m (BUG FIX). flyaway measures distance to the TARGET gate, and the
+    # gate3->gate4 segment is 15.21 m — longer than the old 15 m threshold. The moment the drone
+    # passed gate 3 the command retargeted to gate 4, already beyond the limit, and the episode
+    # terminated with the -30 penalty AS THE REWARD FOR PASSING. diagnose_terminations confirmed:
+    # every death-within-3-steps-of-a-pass was a flyaway right after gate idx 2. Chains through
+    # gate 3 were geometrically impossible. 18 m = longest segment (15.21) + pass overshoot +
+    # spawn noise margin, while still bounding the negative-drift tail that the 15 m value was
+    # introduced for (50 m originally).
+    flyaway = DoneTerm(func=mdp.flyaway, params={"command_name": "target", "distance": 18.0})
+    # Collision via grace-period wrapper (BUG FIX): the Sim 5.1 ContactSensor teleport-spawn
+    # phantom is usually <10 N post-mass-fix but diagnose_terminations measured ~7% of episodes
+    # dying at step<=3 with a mid-air step-1 collision — residual spikes above the 10 N
+    # threshold. illegal_contact_grace ignores contacts during the first 3 control steps after
+    # reset (a real crash cannot physically occur off a mid-air spawn that fast); after the
+    # grace window it is identical to mdp.illegal_contact at 10 N.
     collision = DoneTerm(
-        func=mdp.illegal_contact, params={"sensor_cfg": SceneEntityCfg("collision_sensor"), "threshold": 10.0}
+        func=mdp.illegal_contact_grace,
+        params={"sensor_cfg": SceneEntityCfg("collision_sensor"), "threshold": 10.0, "grace_steps": 3},
     )
 
 

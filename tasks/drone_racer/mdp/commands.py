@@ -164,25 +164,32 @@ class GateTargetingCommand(CommandTerm):
             prev_indices = (self.next_gate_idx - 1) % self.num_gates
             next_indices = self.next_gate_idx  # not yet incremented = next gate to pass
             prev_pos = self.track.data.object_com_pos_w[self.env_ids, prev_indices]
-            prev_quat = self.track.data.object_quat_w[self.env_ids, prev_indices]
             next_pos = self.track.data.object_com_pos_w[self.env_ids, next_indices]
 
             # Curriculum spawn: position is the LERP between prev_gate and next_gate.
             # spawn_lerp_alpha ∈ [0, 1]: 0 = at prev gate, 1 = at next gate, 0.5 = exact halfway.
             # The previous "forward_offset" approach failed on sharp track turns where prev gate's
             # forward axis doesn't point toward next gate. True lerp follows the segment regardless
-            # of gate orientation. Drone retains prev_gate's orientation (so it's facing along the
-            # outgoing forward direction of the gate it just passed).
+            # of gate orientation.
             alpha = self.cfg.spawn_lerp_alpha
             lerp_pos = (1.0 - alpha) * prev_pos + alpha * next_pos
-            # Pass lerp_pos as the "gate" pose with prev_gate's quat so reset_after_prev_gate
-            # applies zero extra forward offset (already accounted for in the lerp).
-            spawn_pose = torch.cat([lerp_pos, prev_quat], dim=1)
 
             # Direction prev→next (world frame) for the initial velocity bias.
             dir_vec = next_pos - prev_pos
             dir_norm = torch.norm(dir_vec, dim=1, keepdim=True).clamp(min=1e-6)
             init_vel = (dir_vec / dir_norm) * self.cfg.spawn_forward_velocity
+
+            # Spawn ORIENTATION faces along the segment (yaw of dir_vec), not prev_gate's quat
+            # (BUG FIX). The old prev_quat spawn faced the drone along the previous gate's exit
+            # axis, which on track turns points up to ~90° away from both the spawn velocity and
+            # the target gate — the drone started camera-blind, translating sideways relative to
+            # its heading, and had to scramble-yaw immediately (dump_fpv: target visible in only
+            # ~15% of frames). Facing the segment aligns heading, velocity, and target at spawn.
+            # The ±yaw noise in pose_range still applies on top.
+            spawn_yaw = torch.atan2(dir_vec[:, 1], dir_vec[:, 0])
+            zeros = torch.zeros_like(spawn_yaw)
+            spawn_quat = math_utils.quat_from_euler_xyz(zeros, zeros, spawn_yaw)
+            spawn_pose = torch.cat([lerp_pos, spawn_quat], dim=1)
 
             reset_after_prev_gate(
                 env=self._env,
