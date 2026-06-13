@@ -3,7 +3,7 @@
   "phase": 2,
   "status": "COMPLETE — 5 iterations done; see loop_report.md",
   "audit_commit": "c3e0716",
-  "remote": { "host": "<REDACTED_HOST>", "user": "<REDACTED_USER>", "workdir": "~/dreamer-drone-racer", "gpu": "RTX 4090 24GB",
+  "remote": { "host": "<REMOTE_HOST: see local ssh notes, not committed>", "user": "<REMOTE_USER>", "workdir": "~/dreamer-drone-racer", "gpu": "RTX 4090 24GB",
     "launch_note": "conda NOT on non-interactive PATH. Launch: `setsid bash ~/dreamer-drone-racer/_launch_iter.sh <steps> >/dev/null 2>&1 </dev/null &` after `git fetch origin -q && git reset --hard origin/master -q`." },
   "final_config": { "gate_passed_weight": 500, "flyaway_m": 15.0, "horizon": 333, "imag_horizon": 15, "decimation": 12, "progress_weight": 50, "progress_asymmetric": false },
   "durable_win": "gate_passed 1000->500 (return/scale ~25% lower, no gate cost). All other levers reverted (neutral/harmful).",
