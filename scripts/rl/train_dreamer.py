@@ -314,6 +314,15 @@ def main():
     h_episodes_at_stage = 0
     h_best_chain2 = 0.0
     h_stall_episodes = 0
+    # Best-checkpoint tracking. agent_latest is overwritten every save_interval and agent_final
+    # only captures the end-state, so when chaining peaks mid-run then erodes the peak policy is
+    # lost. Save agent_best.pt whenever the smoothed gates/ep over a rolling window beats the best
+    # seen so far. Smoothed (not _best_gates, which is a single-episode running max → noisy outlier).
+    BEST_WINDOW = 600
+    BEST_MIN_EPISODES = 600          # window must be warm before first best-save (skip early noise)
+    BEST_IMPROVE_EPS = 0.02          # smoothed gates/ep must beat prior best by this to re-save
+    best_recent_gates: deque = deque(maxlen=BEST_WINDOW)
+    best_smoothed_gates = 0.0
     if use_imag_curriculum:
         agent.cfg.imag_horizon = IMAG_STAGES[h_stage]
         agent.cfg.batch_size = BATCH_STAGES[h_stage]
@@ -397,6 +406,18 @@ def main():
                 writer.add_scalar("env/episode_gates", gates_i, step)
                 if gates_i > agent._best_gates:
                     agent._best_gates = gates_i
+                # Smoothed best-checkpoint: save agent_best.pt when rolling gates/ep peaks, so the
+                # peak policy survives later erosion (agent_latest gets overwritten past the peak).
+                best_recent_gates.append(gates_i)
+                if (
+                    len(best_recent_gates) >= BEST_MIN_EPISODES
+                    and (sum(best_recent_gates) / len(best_recent_gates)) > best_smoothed_gates + BEST_IMPROVE_EPS
+                ):
+                    best_smoothed_gates = sum(best_recent_gates) / len(best_recent_gates)
+                    agent.save(os.path.join(ckpt_dir, "agent_best.pt"))
+                    writer.add_scalar("env/best_smoothed_gates", best_smoothed_gates, step)
+                    print(f"[DreamerV3] step={step:,}  NEW BEST smoothed gates/ep="
+                          f"{best_smoothed_gates:.3f}  -> agent_best.pt", flush=True)
                 ep_rewards[i] = 0.0
                 ep_lengths[i] = 0.0
                 ep_gates[i] = 0.0
