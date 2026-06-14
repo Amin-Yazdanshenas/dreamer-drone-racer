@@ -63,6 +63,8 @@ parser.add_argument("--config", type=str, default=None,
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--no_curriculum", action="store_true", default=False,
                     help="Disable the spawn_lerp_alpha annealing curriculum (keep the cfg value fixed).")
+parser.add_argument("--no_imag_curriculum", action="store_true", default=False,
+                    help="Disable the performance-gated imag_horizon auto-curriculum (keep H fixed at the cfg value).")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -287,6 +289,38 @@ def main():
               f"{len(ALPHA_STAGES)-1}); anneals down as gates/episode >= {ADVANCE_THRESHOLD}",
               flush=True)
 
+    # ----------------------------------------------------------------
+    # Imagination-horizon auto-curriculum (performance-gated).
+    # Single-gate passing saturates (~0.85+ gates/ep) long before multi-gate CHAINING develops,
+    # because the actor trains on imagined rollouts of imag_horizon * dt seconds — at H=24,
+    # dt=0.03 that is 0.72 s, far shorter than a 2-4 s gate-to-gate flight. The actor literally
+    # cannot imagine reaching the next gate, so it masters the single-gate skill within reach but
+    # the >=2-chain rate plateaus (observed: ~5% -> ~8% then flat over 10M steps at fixed H=24).
+    # This grows the imagination reach ONLY once single-gate is mastered AND chaining has stalled,
+    # extending the planning horizon to span more of the inter-gate transition. batch_size shrinks
+    # in lockstep so the AC imagination-graph memory (~ H * batch * seq_len) stays ~constant —
+    # the 4090 runs at ~96% VRAM, so a naive H bump would OOM. Both cfg fields are read fresh each
+    # agent.update(), so live mutation takes effect on the next gradient step.
+    IMAG_STAGES = [24, 32, 40, 48]
+    BATCH_STAGES = [16, 12, 10, 8]      # paired so H*batch ~= 384 (VRAM-neutral)
+    H_WINDOW = 600                      # rolling episodes for the chaining metric
+    H_MIN_EPISODES = 600                # min episodes at an H-stage before it may advance
+    H_GATES_GATE = 0.85                 # single-gate must be mastered to grow H
+    H_STALL_PATIENCE = 800              # episodes of no >=2-chain improvement => stalled
+    H_IMPROVE_EPS = 0.005               # >=0.5 pt counts as a real chain-rate improvement
+    use_imag_curriculum = use_curriculum and not args_cli.no_imag_curriculum
+    h_stage = 0
+    h_recent_gates: deque = deque(maxlen=H_WINDOW)
+    h_episodes_at_stage = 0
+    h_best_chain2 = 0.0
+    h_stall_episodes = 0
+    if use_imag_curriculum:
+        agent.cfg.imag_horizon = IMAG_STAGES[h_stage]
+        agent.cfg.batch_size = BATCH_STAGES[h_stage]
+        print(f"[IMAG-CURRICULUM] imag_horizon={IMAG_STAGES[h_stage]} batch_size={BATCH_STAGES[h_stage]} "
+              f"(stage 0/{len(IMAG_STAGES)-1}); grows once spawn fully annealed, gates/ep>={H_GATES_GATE}, "
+              f"and >=2-chain rate stalls for {H_STALL_PATIENCE} eps", flush=True)
+
     while step < args_cli.max_steps:
         # --- Collect ---
         with torch.no_grad():
@@ -347,6 +381,11 @@ def main():
             writer.add_scalar("replay/buffer_size", len(replay), step)
             writer.add_scalar("replay/num_episodes", replay.num_episodes, step)
             writer.add_scalar("curriculum/spawn_lerp_alpha", cmd_term.cfg.spawn_lerp_alpha, step)
+            writer.add_scalar("curriculum/imag_horizon", agent.cfg.imag_horizon, step)
+            writer.add_scalar("curriculum/batch_size", agent.cfg.batch_size, step)
+            if len(h_recent_gates) > 0:
+                writer.add_scalar("curriculum/chain2_rate",
+                                  sum(1 for z in h_recent_gates if z >= 2) / len(h_recent_gates), step)
             gate_pass_window_passes = 0
             gate_pass_window_steps = 0
             last_gate_pass_log = step
@@ -383,6 +422,40 @@ def main():
                               flush=True)
                         recent_gates.clear()
                         episodes_at_stage = 0
+
+                # Imagination-horizon auto-curriculum. Engages only AFTER the spawn curriculum is
+                # fully annealed (last alpha stage) — growing H while alpha is still shrinking would
+                # confound the two signals. Grows H when single-gate is mastered (rolling gates/ep
+                # >= H_GATES_GATE) AND the >=2-chain rate has not improved for H_STALL_PATIENCE
+                # episodes (early-stopping-style patience on the chain rate).
+                if use_imag_curriculum and stage_idx == len(ALPHA_STAGES) - 1:
+                    h_recent_gates.append(gates_i)
+                    h_episodes_at_stage += 1
+                    if len(h_recent_gates) >= H_WINDOW:
+                        chain2 = sum(1 for z in h_recent_gates if z >= 2) / len(h_recent_gates)
+                        if chain2 > h_best_chain2 + H_IMPROVE_EPS:
+                            h_best_chain2 = chain2
+                            h_stall_episodes = 0
+                        else:
+                            h_stall_episodes += 1
+                        gates_mean = sum(h_recent_gates) / len(h_recent_gates)
+                        if (
+                            h_stage < len(IMAG_STAGES) - 1
+                            and h_episodes_at_stage >= H_MIN_EPISODES
+                            and gates_mean >= H_GATES_GATE
+                            and h_stall_episodes >= H_STALL_PATIENCE
+                        ):
+                            h_stage += 1
+                            agent.cfg.imag_horizon = IMAG_STAGES[h_stage]
+                            agent.cfg.batch_size = BATCH_STAGES[h_stage]
+                            print(f"[IMAG-CURRICULUM] step={step:,}  advance stage {h_stage-1}->{h_stage}  "
+                                  f"imag_horizon {IMAG_STAGES[h_stage-1]} -> {IMAG_STAGES[h_stage]}  "
+                                  f"batch_size {BATCH_STAGES[h_stage-1]} -> {BATCH_STAGES[h_stage]}  "
+                                  f"(gates/ep={gates_mean:.2f}, >=2-chain plateaued at {h_best_chain2:.3f})",
+                                  flush=True)
+                            h_best_chain2 = 0.0
+                            h_stall_episodes = 0
+                            h_episodes_at_stage = 0
 
         obs = next_obs
         step += env.num_envs
