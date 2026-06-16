@@ -117,6 +117,15 @@ def main():
         num_envs=args_cli.num_envs,
         use_fabric=True,
     )
+    # CRITICAL train/eval-parity fix: match the obs-camera refresh cadence the policy trained
+    # under. train_dreamer.py runs headless with sim.render_interval=100, so the TiledCamera
+    # image (rendered only on sim.render()) refreshes every 100 physics steps ~= every 8 RL
+    # steps at decimation=12 — the policy/RSSM learned image dynamics under that staleness. The
+    # PLAY cfg defaults render_interval=decimation=12 (fresh image every RL step), an
+    # out-of-distribution obs stream that collapsed eval (mean 5.1 in training -> 0.31 in eval).
+    # Unless --video needs the viewport, mirror training's headless render_interval.
+    if not args_cli.video:
+        env_cfg.sim.render_interval = 100
     gym_env = gym.make(args_cli.task, cfg=env_cfg,
                        render_mode="rgb_array" if args_cli.video else None)
 
