@@ -320,13 +320,18 @@ class TerminationsCfg:
     flyaway = DoneTerm(func=mdp.flyaway, params={"command_name": "target", "distance": 18.0})
     # Collision via grace-period wrapper (BUG FIX): the Sim 5.1 ContactSensor teleport-spawn
     # phantom is usually <10 N post-mass-fix but diagnose_terminations measured ~7% of episodes
-    # dying at step<=3 with a mid-air step-1 collision — residual spikes above the 10 N
-    # threshold. illegal_contact_grace ignores contacts during the first 3 control steps after
-    # reset (a real crash cannot physically occur off a mid-air spawn that fast); after the
-    # grace window it is identical to mdp.illegal_contact at 10 N.
+    # dying at step<=3 with a mid-air step-1 collision — residual spikes above the threshold.
+    # illegal_contact_grace ignores contacts during the first 3 control steps after reset (a real
+    # crash cannot physically occur off a mid-air spawn that fast); after the grace window it is
+    # identical to mdp.illegal_contact.
+    # threshold 10 -> 25 N: at lap-30% the diagnostic found ~96-100% of deaths are gate-FRAME
+    # collisions (not ground, not flyaway) — the drone clips frames threading through. 10 N killed
+    # light grazes that real drone racing tolerates; 25 N lets glancing contacts survive so chains
+    # continue, directly attacking the threading ceiling. A termination change (not a dense reward),
+    # so it avoids the parking-wall regression that disabled gate_offset_penalty.
     collision = DoneTerm(
         func=mdp.illegal_contact_grace,
-        params={"sensor_cfg": SceneEntityCfg("collision_sensor"), "threshold": 10.0, "grace_steps": 3},
+        params={"sensor_cfg": SceneEntityCfg("collision_sensor"), "threshold": 25.0, "grace_steps": 3},
     )
 
 

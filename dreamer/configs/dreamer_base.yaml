@@ -81,6 +81,12 @@ lam: 0.95
 entropy_scale: 3.0e-3   # 10x paper: bare 3e-4 collapsed policy in earlier runs
 entropy_min: 1.0        # entropy floor (nats)
 entropy_floor_weight: 1.0e-2
+# Entropy-floor anneal (late sharpening). No-op by default (final == min). To sharpen a converged
+# policy, set entropy_min_final lower (e.g. 0.2) and a step window — or pass the CLI flags
+# --entropy_min_final / --entropy_anneal_start / --entropy_anneal_end on a resumed run.
+entropy_min_final: 1.0
+entropy_anneal_start: 0
+entropy_anneal_end: 1
 slow_target_fraction: 0.02   # target critic EMA alpha (= 1 - 0.98)
 
 # ----- Optimizer (LaProp + AGC; paper's grad_clip not wired — AGC used instead) -----

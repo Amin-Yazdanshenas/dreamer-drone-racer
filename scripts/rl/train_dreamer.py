@@ -65,6 +65,21 @@ parser.add_argument("--no_curriculum", action="store_true", default=False,
                     help="Disable the spawn_lerp_alpha annealing curriculum (keep the cfg value fixed).")
 parser.add_argument("--no_imag_curriculum", action="store_true", default=False,
                     help="Disable the performance-gated imag_horizon auto-curriculum (keep H fixed at the cfg value).")
+# Finetune / resume helpers (start a converged policy at the end of the curricula instead of
+# restarting them from scratch — otherwise a naive resume drops imag_horizon back to stage 0).
+parser.add_argument("--imag_start_stage", type=int, default=0,
+                    help="Initial imag_horizon curriculum stage. Start at IMAG_STAGES[N] instead "
+                         "of 0 on a resumed run (e.g. 3 = resume at H=48, then climb to 56/64).")
+parser.add_argument("--spawn_done", action="store_true", default=False,
+                    help="Start the spawn curriculum at its FINAL (fully-annealed) stage — for "
+                         "finetuning a converged policy so it does not re-learn near-gate spawns.")
+parser.add_argument("--entropy_min_final", type=float, default=None,
+                    help="Anneal the entropy floor to this value (late sharpening). Use with "
+                         "--entropy_anneal_start/--entropy_anneal_end.")
+parser.add_argument("--entropy_anneal_start", type=int, default=None,
+                    help="Env-step to begin annealing the entropy floor.")
+parser.add_argument("--entropy_anneal_end", type=int, default=None,
+                    help="Env-step to finish annealing the entropy floor.")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -141,6 +156,14 @@ def _load_config(args) -> DreamerConfig:
     for k, v in merged.items():
         if hasattr(cfg, k):
             setattr(cfg, k, v)
+
+    # CLI overrides (entropy-floor anneal for finetuning a converged policy).
+    if args.entropy_min_final is not None:
+        cfg.entropy_min_final = args.entropy_min_final
+    if args.entropy_anneal_start is not None:
+        cfg.entropy_anneal_start = args.entropy_anneal_start
+    if args.entropy_anneal_end is not None:
+        cfg.entropy_anneal_end = args.entropy_anneal_end
 
     cfg.obs_mode = args.obs_mode
     cfg.__post_init__()   # recompute image_channels from obs_mode
@@ -280,12 +303,14 @@ def main():
     STAGE_WINDOW = 200               # rolling episodes considered
     MIN_EPISODES_PER_STAGE = 200     # don't advance before this many episodes at the stage
     use_curriculum = not args_cli.no_curriculum
-    stage_idx = 0
+    # --spawn_done: start at the final (fully-annealed) stage when finetuning a converged policy,
+    # so it does not re-learn the easy near-gate spawns from scratch.
+    stage_idx = (len(ALPHA_STAGES) - 1) if args_cli.spawn_done else 0
     recent_gates: deque = deque(maxlen=STAGE_WINDOW)
     episodes_at_stage = 0
     if use_curriculum:
         cmd_term.cfg.spawn_lerp_alpha = ALPHA_STAGES[stage_idx]
-        print(f"[CURRICULUM] spawn_lerp_alpha = {ALPHA_STAGES[stage_idx]} (stage 0/"
+        print(f"[CURRICULUM] spawn_lerp_alpha = {ALPHA_STAGES[stage_idx]} (stage {stage_idx}/"
               f"{len(ALPHA_STAGES)-1}); anneals down as gates/episode >= {ADVANCE_THRESHOLD}",
               flush=True)
 
@@ -301,15 +326,20 @@ def main():
     # in lockstep so the AC imagination-graph memory (~ H * batch * seq_len) stays ~constant —
     # the 4090 runs at ~96% VRAM, so a naive H bump would OOM. Both cfg fields are read fresh each
     # agent.update(), so live mutation takes effect on the next gradient step.
-    IMAG_STAGES = [24, 32, 40, 48]
-    BATCH_STAGES = [16, 12, 10, 8]      # paired so H*batch ~= 384 (VRAM-neutral)
+    # Stages extended past 48 (56, 64) so a policy that converged at H=48 can keep growing its
+    # planning reach. batch shrinks in lockstep to hold H*batch ~= 384 (VRAM-neutral): 56*7=392,
+    # 64*6=384, same envelope as 48*8=384.
+    IMAG_STAGES = [24, 32, 40, 48, 56, 64]
+    BATCH_STAGES = [16, 12, 10, 8, 7, 6]   # paired so H*batch ~= 384 (VRAM-neutral)
     H_WINDOW = 600                      # rolling episodes for the chaining metric
     H_MIN_EPISODES = 600                # min episodes at an H-stage before it may advance
     H_GATES_GATE = 0.85                 # single-gate must be mastered to grow H
     H_STALL_PATIENCE = 800              # episodes of no >=2-chain improvement => stalled
     H_IMPROVE_EPS = 0.005               # >=0.5 pt counts as a real chain-rate improvement
     use_imag_curriculum = use_curriculum and not args_cli.no_imag_curriculum
-    h_stage = 0
+    # --imag_start_stage: resume the imag curriculum at a later stage (e.g. 3 = H=48) instead of
+    # restarting at H=24, so a finetuned converged policy keeps its planning reach and climbs on.
+    h_stage = max(0, min(args_cli.imag_start_stage, len(IMAG_STAGES) - 1))
     h_recent_gates: deque = deque(maxlen=H_WINDOW)
     h_episodes_at_stage = 0
     h_best_chain2 = 0.0
@@ -327,7 +357,7 @@ def main():
         agent.cfg.imag_horizon = IMAG_STAGES[h_stage]
         agent.cfg.batch_size = BATCH_STAGES[h_stage]
         print(f"[IMAG-CURRICULUM] imag_horizon={IMAG_STAGES[h_stage]} batch_size={BATCH_STAGES[h_stage]} "
-              f"(stage 0/{len(IMAG_STAGES)-1}); grows once spawn fully annealed, gates/ep>={H_GATES_GATE}, "
+              f"(stage {h_stage}/{len(IMAG_STAGES)-1}); grows once spawn fully annealed, gates/ep>={H_GATES_GATE}, "
               f"and >=2-chain rate stalls for {H_STALL_PATIENCE} eps", flush=True)
 
     while step < args_cli.max_steps:

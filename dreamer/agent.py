@@ -66,6 +66,13 @@ class DreamerConfig:
     entropy_scale: float = 3e-4
     entropy_min: float = 1.0       # floor: add penalty when H[π] drops below this
     entropy_floor_weight: float = 1e-2  # weight on F.relu(entropy_min - entropy) floor penalty
+    # Entropy-floor anneal (late-training sharpening). Default no-op (final == min). When
+    # entropy_min_final is set lower, the floor linearly anneals entropy_min -> entropy_min_final
+    # between [entropy_anneal_start, entropy_anneal_end] env-steps, letting a converged policy
+    # drop below the early-exploration floor, reduce action noise, and sharpen gate threading.
+    entropy_min_final: float = 1.0      # anneal target; == entropy_min => no anneal
+    entropy_anneal_start: int = 0       # env-step to begin annealing the floor
+    entropy_anneal_end: int = 1         # env-step to reach entropy_min_final
     slow_target_fraction: float = 0.02  # Polyak rate for the target critic (agent.py _soft_update)
     # ReturnEMA percentile-normaliser decay. Decoupled from slow_target_fraction so the value
     # normaliser and the target-critic lag can be tuned independently (review:
@@ -862,7 +869,17 @@ class DreamerV3Agent:
         # ent_seq is departure-indexed (s_0..s_{H-1}), matching targets and w.
         ent_flat = ent_seq.reshape(HH * B2)
         entropy = (w_flat * ent_flat).sum() / w_sum
-        floor_pen = F.relu(torch.tensor(self.cfg.entropy_min, device=entropy.device) - entropy)
+        # Linearly anneal the entropy floor entropy_min -> entropy_min_final across
+        # [entropy_anneal_start, entropy_anneal_end] env-steps (no-op when final == min). Lets a
+        # converged policy drop below the early-exploration floor and sharpen late in training.
+        eff_entropy_min = self.cfg.entropy_min
+        if (self.cfg.entropy_min_final != self.cfg.entropy_min
+                and self.cfg.entropy_anneal_end > self.cfg.entropy_anneal_start):
+            frac = (self._step - self.cfg.entropy_anneal_start) / (
+                self.cfg.entropy_anneal_end - self.cfg.entropy_anneal_start)
+            frac = min(max(frac, 0.0), 1.0)
+            eff_entropy_min = self.cfg.entropy_min + frac * (self.cfg.entropy_min_final - self.cfg.entropy_min)
+        floor_pen = F.relu(torch.tensor(eff_entropy_min, device=entropy.device) - entropy)
         actor_value = (w_flat * targets_norm.reshape(HH * B2)).sum() / w_sum
         actor_loss = -actor_value - self.cfg.entropy_scale * entropy + self.cfg.entropy_floor_weight * floor_pen
 
@@ -896,6 +913,7 @@ class DreamerV3Agent:
             "actor/loss": actor_loss.item(),
             "actor/entropy": entropy.item(),
             "actor/floor_pen": floor_pen.item(),
+            "actor/entropy_min_eff": float(eff_entropy_min),
             "actor/action_abs_mean": action_abs_mean.item(),
             "actor/action_sat_frac": action_sat_frac.item(),
             "critic/loss": crit_loss.item(),
