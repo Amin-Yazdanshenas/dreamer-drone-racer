@@ -157,7 +157,13 @@ class DreamerIsaacEnvWrapper:
         # CROSS it — for racing the correct action is to go through along the gate normal from the
         # right side, not just reach the centre. Giving the actor the gate facing closes that gap.
         gate_nb = _compute_gate_normal_b(robot, isaac, self.command_name).cpu()   # (N, 3)
-        state = torch.cat([ang_vel, quat, lin_vel, target_pb, gate_nb], dim=-1).float()
+        # 2-gate look-ahead: centre + through-normal of the gate AFTER the current target, body
+        # frame. Current 1-gate state is myopic — the actor cannot plan the line through this gate
+        # to set up the next, which is where chains break (turns). 16 -> 22 dims.
+        la_pb, la_nb = _compute_lookahead_gate_pose_b(robot, isaac, self.command_name)
+        state = torch.cat(
+            [ang_vel, quat, lin_vel, target_pb, gate_nb, la_pb.cpu(), la_nb.cpu()], dim=-1
+        ).float()
 
         # --- Privileged state for Informed-Dreamer decoder (12-dim) ---
         # Ground-truth signals the actor does NOT see but the WM decoder reconstructs.
@@ -268,6 +274,25 @@ def _compute_target_pos_b(robot, isaac_env, command_name: str) -> torch.Tensor:
         robot.data.root_pos_w, robot.data.root_quat_w, target_pos_w
     )
     return pos_b
+
+
+def _compute_lookahead_gate_pose_b(robot, isaac_env, command_name: str):
+    """Centre + through-normal of the gate AFTER the current target, in the drone body frame.
+
+    2-gate look-ahead: the current-gate-only state is myopic, so the actor cannot plan the line
+    through this gate to set up the next — exactly where chains break (turns). Returns
+    (pos_b (N,3), normal_b (N,3)). The next-next gate index wraps modulo num_gates.
+    """
+    cmd = isaac_env.command_manager.get_term(command_name)
+    nxt = (cmd.next_gate_idx.long() + 1) % cmd.num_gates                       # (N,)
+    env_ids = torch.arange(cmd.num_envs, device=cmd.track.data.object_com_pos_w.device)
+    pos_w = cmd.track.data.object_com_pos_w[env_ids, nxt]                      # (N, 3)
+    quat_w = cmd.track.data.object_quat_w[env_ids, nxt]                        # (N, 4)
+    pos_b, _ = math_utils.subtract_frame_transforms(robot.data.root_pos_w, robot.data.root_quat_w, pos_w)
+    x_axis = torch.tensor([[1.0, 0.0, 0.0]], device=quat_w.device).expand(quat_w.shape[0], 3)
+    normal_w = math_utils.quat_apply(quat_w, x_axis)                          # gate normal in world
+    normal_b = math_utils.quat_apply_inverse(robot.data.root_quat_w, normal_w)  # in body frame
+    return pos_b, normal_b
 
 
 def _compute_gate_normal_b(robot, isaac_env, command_name: str) -> torch.Tensor:

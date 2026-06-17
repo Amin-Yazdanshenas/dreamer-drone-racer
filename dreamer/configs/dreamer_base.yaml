@@ -10,7 +10,8 @@
 
 obs_mode: rgb
 image_channels: 3       # overridden per obs-mode yaml
-state_dim: 16           # ang_vel(3) + quat(4) + lin_vel(3) + target_pos_b(3) + gate_normal_b(3)
+image_size: 96          # square camera res (H=W); MUST match TiledCameraCfg width/height (64 -> 96)
+state_dim: 22           # ang_vel(3)+quat(4)+lin_vel(3)+target_pos_b(3)+gate_normal_b(3)+next_pos_b(3)+next_normal_b(3)
 action_dim: 4
 
 # ----- RSSM (faithful R2-Dreamer port: h_dim=2048, hidden=768, stoch=32, discrete=32) -----
@@ -109,11 +110,12 @@ batch_size: 16
 # at 512 envs.
 warmup_steps: 50000
 update_every: 1
-# n_grad_steps controls train ratio. With B=16, T=64 → 1024 sampled timesteps per grad step,
-# and 512 envs adding 512 new transitions per env-step, n_grad_steps=4 gave sample/collected
-# ≈ 8x. DreamerV3 paper uses 16-64x. Bumping to 8 lifts ratio to ~16x and pushes more work
-# onto the GPU (sim was the wall-time bottleneck at 5% GPU util on the last 4090 run).
-n_grad_steps: 8
+# n_grad_steps controls train ratio. With B=16, T=64 → 1024 sampled timesteps per grad step.
+# 8 -> 4: at 256 envs the loop was UPDATE-bound (8 grad steps per env-step cycle => GPU util
+# oscillating 38-99%, ~0.3M steps/hr). Halving to 4 ~doubles env throughput (faster wall-clock /
+# faster iteration) at ~8x sample-to-collected ratio, still within the DreamerV3 range. Also eases
+# VRAM headroom for the 96x96 encoder. Raise back toward 8 if sample efficiency suffers.
+n_grad_steps: 4
 
 # ----- Replay -----
 replay_capacity: 2000000

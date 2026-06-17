@@ -158,7 +158,16 @@ def gate_passed(
     if penalize_miss:
         missed = crossing & ~in_gate
         return passed.float() - missed.float()
-    return passed.float()
+    # Centering-scaled pass bonus: reward CLEAN (centered) crossings more than edge grazes, to
+    # teach tighter threading lines (the policy currently learns "pass somehow", clipping frames —
+    # ~96-100% of deaths are gate-frame collisions). Paid ONLY at the crossing event: a sparse,
+    # per-pass scaling, NOT a dense plane-local field, so it avoids the parking-wall optimum that
+    # forced gate_offset_penalty to weight 0. offset_norm in [0,1]: 0 = dead-centre, 1 = frame
+    # edge. Multiplier in [0.5, 1.0] — an off-centre pass still pays (it IS a pass), a centred pass
+    # pays double, giving a gradient toward the centre.
+    offset_norm = (torch.maximum(rel_gate[:, 1].abs(), rel_gate[:, 2].abs()) / half_size).clamp(0.0, 1.0)
+    center_mult = 1.0 - 0.5 * offset_norm
+    return passed.float() * center_mult
 
 
 def lookat_next_gate(

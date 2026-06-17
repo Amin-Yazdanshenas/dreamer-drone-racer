@@ -80,7 +80,10 @@ def test_actor_critic_loss_finite(tiny_cfg):
     agent = DreamerV3Agent(tiny_cfg, device="cpu")
     B, T = tiny_cfg.batch_size, tiny_cfg.seq_len
     batch = {
-        "image": torch.randint(0, 255, (B, T, 64, 64, tiny_cfg.image_channels), dtype=torch.uint8).float() / 255.0,
+        "image": torch.randint(
+            0, 255, (B, T, tiny_cfg.image_size, tiny_cfg.image_size, tiny_cfg.image_channels),
+            dtype=torch.uint8,
+        ).float() / 255.0,
         "state": torch.randn(B, T, tiny_cfg.state_dim),
         "action": torch.randn(B, T, tiny_cfg.action_dim),
         "reward": torch.randn(B, T),

@@ -57,7 +57,7 @@ def r2_cfg():
 
 def _dummy_batch(cfg, device="cpu"):
     B, T = cfg.batch_size, cfg.seq_len
-    H, W, C = 64, 64, cfg.image_channels
+    H, W, C = cfg.image_size, cfg.image_size, cfg.image_channels
     return {
         "image": torch.randint(0, 255, (B, T, H, W, C), dtype=torch.uint8),
         "state": torch.randn(B, T, cfg.state_dim),
@@ -196,7 +196,7 @@ class TestNEDreamerAgent:
         agent.eval_mode()
         agent._step = ne_cfg.warmup_steps + 1
         obs = {
-            "image": torch.zeros(2, 64, 64, ne_cfg.image_channels, dtype=torch.uint8),
+            "image": torch.zeros(2, ne_cfg.image_size, ne_cfg.image_size, ne_cfg.image_channels, dtype=torch.uint8),
             "state": torch.zeros(2, ne_cfg.state_dim),
         }
         actions = agent.act(obs)

@@ -34,7 +34,11 @@ class DreamerConfig:
     # Observation
     obs_mode: str = "rgb"
     image_channels: int = 3
-    state_dim: int = 16   # ang_vel(3)+quat(4)+lin_vel(3)+target_pos_b(3)+gate_normal_b(3)
+    image_size: int = 96  # square camera resolution (H=W); must match TiledCameraCfg width/height
+    # state_dim 16->22: added 2-gate look-ahead (next gate pos_b(3) + normal_b(3)) so the actor is
+    # not myopic to the current gate — the turns into later gates are where chains break.
+    # layout: ang_vel(3)+quat(4)+lin_vel(3)+target_pos_b(3)+gate_normal_b(3)+next_pos_b(3)+next_normal_b(3)
+    state_dim: int = 22
     action_dim: int = 4
 
     # CNN encoder
@@ -344,7 +348,7 @@ class DreamerV3Agent:
         self._amp_device = "cuda" if self.device.type == "cuda" else "cpu"
 
         # Encoder
-        image_shape = (64, 64, cfg.image_channels)  # (H, W, C)
+        image_shape = (cfg.image_size, cfg.image_size, cfg.image_channels)  # (H, W, C)
         self.encoder = DroneEncoder(
             image_shape=image_shape,
             state_dim=cfg.state_dim,
