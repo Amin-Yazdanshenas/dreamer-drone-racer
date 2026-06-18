@@ -142,7 +142,7 @@ class DreamerConfig:
     n_grad_steps: int = 4
 
     # Replay
-    replay_capacity: int = 2_000_000
+    replay_capacity: int = 1_200_000  # ~33 GB of 96x96 uint8 images on CPU RAM (62 GB box); see yaml note
 
     # Speed
     compile: bool = True          # currently a no-op flag (no torch.compile call wires it)
