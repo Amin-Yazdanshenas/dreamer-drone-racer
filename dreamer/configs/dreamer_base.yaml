@@ -111,11 +111,11 @@ batch_size: 16
 warmup_steps: 50000
 update_every: 1
 # n_grad_steps controls train ratio. With B=16, T=64 → 1024 sampled timesteps per grad step.
-# 8 -> 4: at 256 envs the loop was UPDATE-bound (8 grad steps per env-step cycle => GPU util
-# oscillating 38-99%, ~0.3M steps/hr). Halving to 4 ~doubles env throughput (faster wall-clock /
-# faster iteration) at ~8x sample-to-collected ratio, still within the DreamerV3 range. Also eases
-# VRAM headroom for the 96x96 encoder. Raise back toward 8 if sample efficiency suffers.
-n_grad_steps: 4
+# 4 -> 6 (MEDIUM): 4 was light — the first 96px run capped lap ~18% and then suffered an actor-
+# critic collapse ~30M (fewer updates => noisier value). A DreamerV3-on-TSC tuning study found NO
+# evidence that a HIGHER train ratio accelerates convergence and that MEDIUM ratios work well, so
+# we go to 6 (not back to 8): a modest stability bump that keeps most of the throughput win.
+n_grad_steps: 6
 
 # ----- Replay -----
 # 2M -> 1.2M: the buffer stores raw uint8 images on CPU RAM. At 96x96 each image is 96*96*3 =

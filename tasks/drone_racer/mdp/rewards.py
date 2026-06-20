@@ -162,11 +162,13 @@ def gate_passed(
     # teach tighter threading lines (the policy currently learns "pass somehow", clipping frames —
     # ~96-100% of deaths are gate-frame collisions). Paid ONLY at the crossing event: a sparse,
     # per-pass scaling, NOT a dense plane-local field, so it avoids the parking-wall optimum that
-    # forced gate_offset_penalty to weight 0. offset_norm in [0,1]: 0 = dead-centre, 1 = frame
-    # edge. Multiplier in [0.5, 1.0] — an off-centre pass still pays (it IS a pass), a centred pass
-    # pays double, giving a gradient toward the centre.
+    # forced gate_offset_penalty to weight 0. offset_norm in [0,1]: 0 = dead-centre, 1 = frame edge.
+    # Multiplier in [0.8, 1.0] (softened from [0.5,1.0]): the first run capped lap ~18% (below the
+    # 30% baseline) — a 2x centre-vs-edge gap had gutted the gate signal ~2.5x (imag value +56 vs
+    # +140 at equal lap), weakening chaining pressure. A gentle 0.8-1.0 nudge keeps a threading
+    # gradient while restoring most of the gate signal.
     offset_norm = (torch.maximum(rel_gate[:, 1].abs(), rel_gate[:, 2].abs()) / half_size).clamp(0.0, 1.0)
-    center_mult = 1.0 - 0.5 * offset_norm
+    center_mult = 1.0 - 0.2 * offset_norm
     return passed.float() * center_mult
 
 
