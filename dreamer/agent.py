@@ -34,7 +34,8 @@ class DreamerConfig:
     # Observation
     obs_mode: str = "rgb"
     image_channels: int = 3
-    image_size: int = 96  # square camera resolution (H=W); must match TiledCameraCfg width/height
+    # 96px ablation HURT single-gate mastery (capped ~0.72, two runs) -> reverted to the proven 64.
+    image_size: int = 64  # square camera resolution (H=W); must match TiledCameraCfg width/height
     # state_dim reverted 22->16 (lookahead removed) to isolate the 96px-camera ablation.
     # layout: ang_vel(3)+quat(4)+lin_vel(3)+target_pos_b(3)+gate_normal_b(3)
     state_dim: int = 16
@@ -141,7 +142,7 @@ class DreamerConfig:
     n_grad_steps: int = 4
 
     # Replay
-    replay_capacity: int = 1_200_000  # ~33 GB of 96x96 uint8 images on CPU RAM (62 GB box); see yaml note
+    replay_capacity: int = 2_000_000  # ~24 GB of 64x64 uint8 images on CPU RAM (62 GB box); re-cap if camera >64
 
     # Speed
     compile: bool = True          # currently a no-op flag (no torch.compile call wires it)

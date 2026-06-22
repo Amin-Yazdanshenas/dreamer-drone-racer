@@ -10,7 +10,7 @@
 
 obs_mode: rgb
 image_channels: 3       # overridden per obs-mode yaml
-image_size: 96          # square camera res (H=W); MUST match TiledCameraCfg width/height. THE ablation variable.
+image_size: 64          # square camera res (H=W); MUST match TiledCameraCfg width/height (96px ablation hurt)
 state_dim: 16           # ang_vel(3)+quat(4)+lin_vel(3)+target_pos_b(3)+gate_normal_b(3) — lookahead reverted
 action_dim: 4
 
@@ -117,11 +117,10 @@ update_every: 1
 n_grad_steps: 8
 
 # ----- Replay -----
-# 2M -> 1.2M: the buffer stores raw uint8 images on CPU RAM. At 96x96 each image is 96*96*3 =
-# 27.6 KB, so 2M capacity = ~55 GB and the run OOM-killed on the 62 GB box once the buffer filled
-# (~1.84M). 1.2M = ~33 GB images + ~15 GB Isaac/torch overhead = ~48 GB, comfortable headroom.
-# (At the old 64x64 res, 2M only needed ~24 GB — the camera bump is what blew the RAM budget.)
-replay_capacity: 1200000
+# 2M is safe at 64x64 (each image 64*64*3 = 12 KB -> 2M ~= 24 GB CPU RAM on the 62 GB box). The
+# 1.2M cap was only needed at 96px (27.6 KB/image -> 2M ~= 55 GB OOM). Reverted to the proven-30%
+# baseline 2M now that the camera is back to 64. If you re-raise the camera, re-cap this.
+replay_capacity: 2000000
 
 # ----- Speed -----
 # compile is currently a dead flag — no torch.compile(...) call wires it in agent.py.

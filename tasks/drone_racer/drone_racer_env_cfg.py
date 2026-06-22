@@ -77,12 +77,12 @@ class DroneRacerSceneCfg(InteractiveSceneCfg):
         data_types=["semantic_segmentation"],
         colorize_semantic_segmentation=False,
         spawn=sim_utils.PinholeCameraCfg(),
-        # 64 -> 96: at 64x64 the CNN collapses to a 2x2 spatial grid and a gate frame edge
-        # (~2-7 px) is sub-cell — the world model literally cannot resolve the frames the drone
-        # keeps clipping (~96-100% of deaths are gate-frame collisions). 96x96 gives a 4x4 grid.
-        # NOTE: must match dreamer image_size in dreamer/configs (encoder input shape).
-        width=96,
-        height=96,
+        # 64x64 (proven 30% baseline). The 96px ablation HURT: with the same encoder capacity it
+        # capped single-gate mastery at mean ~0.72 (two runs) vs 64px mastering it and chaining to
+        # 30% — more pixels need a bigger encoder, not the same one. NOTE: must match dreamer
+        # image_size in dreamer/configs (encoder input shape).
+        width=64,
+        height=64,
     )
 
     # lights
