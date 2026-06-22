@@ -326,11 +326,10 @@ def main():
     # in lockstep so the AC imagination-graph memory (~ H * batch * seq_len) stays ~constant —
     # the 4090 runs at ~96% VRAM, so a naive H bump would OOM. Both cfg fields are read fresh each
     # agent.update(), so live mutation takes effect on the next gradient step.
-    # Stages extended past 48 (56, 64) so a policy that converged at H=48 can keep growing its
-    # planning reach. batch shrinks in lockstep to hold H*batch ~= 384 (VRAM-neutral): 56*7=392,
-    # 64*6=384, same envelope as 48*8=384.
-    IMAG_STAGES = [24, 32, 40, 48, 56, 64]
-    BATCH_STAGES = [16, 12, 10, 8, 7, 6]   # paired so H*batch ~= 384 (VRAM-neutral)
+    # Stages reverted to [24..48] (the old 30% baseline) to isolate the 96px-camera ablation.
+    # batch shrinks in lockstep to hold H*batch ~= 384 (VRAM-neutral).
+    IMAG_STAGES = [24, 32, 40, 48]
+    BATCH_STAGES = [16, 12, 10, 8]   # paired so H*batch ~= 384 (VRAM-neutral)
     H_WINDOW = 600                      # rolling episodes for the chaining metric
     H_MIN_EPISODES = 600                # min episodes at an H-stage before it may advance
     H_GATES_GATE = 0.85                 # single-gate must be mastered to grow H

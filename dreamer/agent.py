@@ -35,10 +35,9 @@ class DreamerConfig:
     obs_mode: str = "rgb"
     image_channels: int = 3
     image_size: int = 96  # square camera resolution (H=W); must match TiledCameraCfg width/height
-    # state_dim 16->22: added 2-gate look-ahead (next gate pos_b(3) + normal_b(3)) so the actor is
-    # not myopic to the current gate — the turns into later gates are where chains break.
-    # layout: ang_vel(3)+quat(4)+lin_vel(3)+target_pos_b(3)+gate_normal_b(3)+next_pos_b(3)+next_normal_b(3)
-    state_dim: int = 22
+    # state_dim reverted 22->16 (lookahead removed) to isolate the 96px-camera ablation.
+    # layout: ang_vel(3)+quat(4)+lin_vel(3)+target_pos_b(3)+gate_normal_b(3)
+    state_dim: int = 16
     action_dim: int = 4
 
     # CNN encoder

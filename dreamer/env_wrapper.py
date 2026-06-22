@@ -157,13 +157,10 @@ class DreamerIsaacEnvWrapper:
         # CROSS it — for racing the correct action is to go through along the gate normal from the
         # right side, not just reach the centre. Giving the actor the gate facing closes that gap.
         gate_nb = _compute_gate_normal_b(robot, isaac, self.command_name).cpu()   # (N, 3)
-        # 2-gate look-ahead: centre + through-normal of the gate AFTER the current target, body
-        # frame. Current 1-gate state is myopic — the actor cannot plan the line through this gate
-        # to set up the next, which is where chains break (turns). 16 -> 22 dims.
-        la_pb, la_nb = _compute_lookahead_gate_pose_b(robot, isaac, self.command_name)
-        state = torch.cat(
-            [ang_vel, quat, lin_vel, target_pb, gate_nb, la_pb.cpu(), la_nb.cpu()], dim=-1
-        ).float()
+        # State reverted to 16-dim (lookahead removed) to isolate the 96px-camera ablation against
+        # the old 30% baseline. The _compute_lookahead_gate_pose_b helper is kept (unused) for a
+        # future single-variable lookahead test.
+        state = torch.cat([ang_vel, quat, lin_vel, target_pb, gate_nb], dim=-1).float()
 
         # --- Privileged state for Informed-Dreamer decoder (12-dim) ---
         # Ground-truth signals the actor does NOT see but the WM decoder reconstructs.

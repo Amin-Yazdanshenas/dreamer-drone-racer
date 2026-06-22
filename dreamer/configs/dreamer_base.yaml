@@ -10,8 +10,8 @@
 
 obs_mode: rgb
 image_channels: 3       # overridden per obs-mode yaml
-image_size: 96          # square camera res (H=W); MUST match TiledCameraCfg width/height (64 -> 96)
-state_dim: 22           # ang_vel(3)+quat(4)+lin_vel(3)+target_pos_b(3)+gate_normal_b(3)+next_pos_b(3)+next_normal_b(3)
+image_size: 96          # square camera res (H=W); MUST match TiledCameraCfg width/height. THE ablation variable.
+state_dim: 16           # ang_vel(3)+quat(4)+lin_vel(3)+target_pos_b(3)+gate_normal_b(3) — lookahead reverted
 action_dim: 4
 
 # ----- RSSM (faithful R2-Dreamer port: h_dim=2048, hidden=768, stoch=32, discrete=32) -----
@@ -111,11 +111,10 @@ batch_size: 16
 warmup_steps: 50000
 update_every: 1
 # n_grad_steps controls train ratio. With B=16, T=64 → 1024 sampled timesteps per grad step.
-# 4 -> 6 (MEDIUM): 4 was light — the first 96px run capped lap ~18% and then suffered an actor-
-# critic collapse ~30M (fewer updates => noisier value). A DreamerV3-on-TSC tuning study found NO
-# evidence that a HIGHER train ratio accelerates convergence and that MEDIUM ratios work well, so
-# we go to 6 (not back to 8): a modest stability bump that keeps most of the throughput win.
-n_grad_steps: 6
+# RESTORED to 8 (the old 30% baseline value). 4/6 underperformed — fewer updates/sample => lower
+# sample efficiency + lower ceiling. Back to 8 to isolate the 96px-camera ablation against the
+# 30% baseline (accept the slower wall-clock).
+n_grad_steps: 8
 
 # ----- Replay -----
 # 2M -> 1.2M: the buffer stores raw uint8 images on CPU RAM. At 96x96 each image is 96*96*3 =
