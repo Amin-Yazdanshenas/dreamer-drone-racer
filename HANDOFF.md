@@ -28,7 +28,7 @@
 | RSSM deter `h_dim` | 2048 | | seq_len / batch_size | 64 / 16 (stage 0) |
 | stoch × discrete | 32 × 32 (→1024); latent 3072 | | num_envs | 256 |
 | hidden / cnn_depth | 256 / 48 (mults [1,2,4,8]) | | decimation / ctrl dt | 12 / 0.03 s (sim 1/400) |
-| lr (LaProp) | 4e-5 | | entropy_scale / _min | 3e-3 / 1.0 floor |
+| lr (LaProp) | **1e-4** (yaml; overrides the 4e-5 dataclass default — comment says "4e-5" but value is 1e-4) | | entropy_scale / _min | 3e-3 / 1.0 floor |
 | priv_decode / barlow | 12-dim, w=1.0 / w=0.05 | | kl_free / β_dyn / β_rep | 0.1 / 0.5 / 0.1 |
 | action | CTBR (4-dim) | | episode / track | 20 s / 7 gates |
 | reward | progress 50 (signed) + gate 500 + terminating −1000 + lookat 0.5 + ang_vel −0.002 | | | |

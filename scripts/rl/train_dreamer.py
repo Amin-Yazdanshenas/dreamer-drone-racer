@@ -245,9 +245,20 @@ def main():
     )
     ckpt_dir = os.path.join(log_dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
+    # Dump the FULLY RESOLVED config (after yaml merge + CLI overrides) so every run records the
+    # exact hyperparameters it used — no more guessing whether a run matched a baseline (e.g. the
+    # lr=1e-4-vs-4e-5 confusion). Also dump the key CLI args.
+    import yaml as _yaml
+    _resolved = {k: v for k, v in vars(cfg).items() if not callable(v)}
+    _resolved["_cli"] = {"task": args_cli.task, "obs_mode": args_cli.obs_mode, "agent": args_cli.agent,
+                         "num_envs": env.num_envs, "max_steps": args_cli.max_steps,
+                         "checkpoint": args_cli.checkpoint, "imag_start_stage": args_cli.imag_start_stage,
+                         "spawn_done": args_cli.spawn_done}
+    with open(os.path.join(log_dir, "resolved_config.yaml"), "w") as _f:
+        _yaml.safe_dump(_resolved, _f, default_flow_style=False, sort_keys=True)
     # flush_secs=30 (default 120) prevents large blocking flushes after long uptime.
     writer = SummaryWriter(log_dir=os.path.join(log_dir, "tensorboard"), flush_secs=30)
-    print(f"[DreamerV3] Logging to {log_dir}")
+    print(f"[DreamerV3] Logging to {log_dir}  (resolved_config.yaml written)")
 
     # Write an initial checkpoint immediately so a future empty checkpoints/ dir can only
     # mean save_interval-triggered saves never fired (i.e. updates never happened), not that

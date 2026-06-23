@@ -567,9 +567,15 @@ class DreamerV3Agent:
         with torch.autocast(device_type=self._amp_device, dtype=self._amp_dtype):
             embed = self.encoder(obs_in)
             reset_mask = is_first.to(self.device).bool() if is_first is not None else None
+            # ALWAYS sample the RSSM posterior latent — even for deterministic eval. Coupling
+            # latent sampling to the action flag (the old `sample=not deterministic`) forced the
+            # latent to its argmax mode at eval, which is OUT-OF-DISTRIBUTION vs the sampled
+            # latents the policy was rolled out on in training, collapsing deterministic eval
+            # (mean 0.34 gates vs 4.2 stochastic on the same checkpoint). `deterministic` now
+            # controls ONLY the action (actor mode below), not latent inference.
             post_stoch, new_deter, _ = self.rssm.obs_step(
                 stoch, deter, prev_action, embed, reset=reset_mask,
-                sample=not deterministic,
+                sample=True,
             )
 
         post_stoch = post_stoch.float()
