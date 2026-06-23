@@ -337,15 +337,13 @@ def main():
     # in lockstep so the AC imagination-graph memory (~ H * batch * seq_len) stays ~constant —
     # the 4090 runs at ~96% VRAM, so a naive H bump would OOM. Both cfg fields are read fresh each
     # agent.update(), so live mutation takes effect on the next gradient step.
-    # Imag-horizon curriculum stages. batch shrinks in lockstep to hold H*batch ~= 384, which keeps
-    # the AC imagination-graph memory (~ H * batch * seq_len) ~constant => VRAM-neutral across
-    # stages. The true VRAM PEAK is stage 0 (batch 16, ~19.3 GB at 96px, fits 24 GB); every higher-H
-    # stage has a smaller batch so its world-model image memory is LOWER, hence all stages fit.
-    # Extended to H=80 for deeper planning (80*0.03s dt = 2.4s imagination, covers a full inter-gate
-    # transition). batch floor is 5 (>=5 keeps Barlow/AC gradients stable); do NOT pair a larger H
-    # with batch <5 or the H*batch envelope breaks and VRAM/grad-noise both suffer.
-    IMAG_STAGES = [24, 32, 40, 48, 56, 64, 72, 80]
-    BATCH_STAGES = [16, 12, 10, 8, 7, 6, 5, 5]   # H*batch: 384,384,400,384,392,384,360,400 (~384, VRAM-neutral)
+    # Imag-horizon curriculum stages = [24..48], the EXACT proven 30% baseline (run 2026-06-13).
+    # batch shrinks in lockstep to hold H*batch ~= 384 (VRAM-neutral). The H=56..80 extension was
+    # reverted: it only engages after single-gate mastery + chain-stall (dormant for ~20M steps),
+    # and we are reproducing the clean baseline first before re-adding any single variable. The
+    # extended stages live in git history (commit bb5eecd) for a later horizon test.
+    IMAG_STAGES = [24, 32, 40, 48]
+    BATCH_STAGES = [16, 12, 10, 8]   # H*batch ~= 384 (VRAM-neutral)
     H_WINDOW = 600                      # rolling episodes for the chaining metric
     H_MIN_EPISODES = 600                # min episodes at an H-stage before it may advance
     H_GATES_GATE = 0.85                 # single-gate must be mastered to grow H
