@@ -1,8 +1,8 @@
 # Handoff — DreamerV3 Drone Racing
 
-**Last updated:** 2026-06-20
+**Last updated:** 2026-06-23
 **Repo:** `git@github.com:Amin-Yazdanshenas/dreamer-drone-racer.git`, branch `master`
-**Active agent:** R2-Dreamer (Barlow Twins), RGB obs, 256 envs.
+**Active agent:** R2-Dreamer — a **PyTorch** DreamerV3 variant (Barlow-Twins repr loss + informed/privileged 12-dim decoder, NO image-reconstruction, NO JAX). 256 envs.
 **Compute:** training runs on a REMOTE box `avl-super@100.117.154.65` (RTX 4090 24 GB VRAM, **62 GB host RAM**). The local machine is a 6 GB RTX 3060 laptop — too small for full training; only used for short headless evals/diagnostics.
 
 > NOTE: CLAUDE.md says RSSM `discrete=16` and "state is 13-dim" — both STALE. Actual: `discrete=32`, policy state is now **22-dim** (see below).
@@ -11,16 +11,44 @@
 
 ## 1. Current state (what's running NOW)
 
-- **v3 corrective run** — launched 2026-06-20 on commit `e8958e8`, fresh from scratch, `--max_steps 50000000`. Log: `~/train_v3.log` on the remote. Newest dir under `logs/dreamer/r2dreamer/rgb/`.
-- Healthy at last check (proc alive, GPU ~60%, VRAM ~19 GB, RAM filling toward ~48 GB cap). Very early (~0.5M steps when last seen).
-- **What v3 tests:** does *96px perception + 2-gate look-ahead state* — with the gate reward kept strong and a medium train ratio — beat the old 30% lap ceiling? It strips the two changes that capped/crashed the previous attempt (see §2).
+- **Run `2026-06-22_17-37-15`** (commit `7cdf203`) — the proven **64px 30% baseline + ONLY the extended imag_horizon curriculum [24..80]**. Fresh from scratch, `--max_steps 45M`, log `~/train_64imag.log`.
+- Tests one variable: does **more planning horizon** (old run maxed at H=48, plateaued ~30%) push chaining past 30%?
+- Status ~06-23: healthy (proc alive, GPU ~60-90%, VRAM ~18 GB, RAM ~39 GB capped). Step ~2.5M, mean ~0.80 gates — still in the single-gate-learning phase (imag stays at 24 until mean ≥0.85). Slow (~0.3M steps/hr at n_grad 8).
 
 ### Best checkpoints / fallbacks (all on remote)
 | Policy | Path | Note |
 |---|---|---|
-| **Best overall — 30% lap** | `logs/dreamer/r2dreamer/rgb/2026-06-13_21-29-13/checkpoints/agent_snapshot_36M.pt` | the proven peak; KEEP |
-| v2b ~18% peak | `logs/dreamer/r2dreamer/rgb/2026-06-17_21-37-22/checkpoints/agent_best.pt` | full-package run (capped low) |
-| v3 live best | `<v3 run dir>/checkpoints/agent_best.pt` | auto-saved on smoothed-gates peak |
+| **Best overall — 30% lap** | `2026-06-13_21-29-13/checkpoints/agent_snapshot_36M.pt` | the proven peak; KEEP |
+| v2b ~18% peak | `2026-06-17_21-37-22/checkpoints/agent_best.pt` | 96px full-package (capped low) |
+
+## 1a. Shared model (R2-Dreamer — constant across ALL runs below)
+
+| Param | Value | | Param | Value |
+|---|---|---|---|---|
+| RSSM deter `h_dim` | 2048 | | seq_len / batch_size | 64 / 16 (stage 0) |
+| stoch × discrete | 32 × 32 (→1024); latent 3072 | | num_envs | 256 |
+| hidden / cnn_depth | 256 / 48 (mults [1,2,4,8]) | | decimation / ctrl dt | 12 / 0.03 s (sim 1/400) |
+| lr (LaProp) | 4e-5 | | entropy_scale / _min | 3e-3 / 1.0 floor |
+| priv_decode / barlow | 12-dim, w=1.0 / w=0.05 | | kl_free / β_dyn / β_rep | 0.1 / 0.5 / 0.1 |
+| action | CTBR (4-dim) | | episode / track | 20 s / 7 gates |
+| reward | progress 50 (signed) + gate 500 + terminating −1000 + lookat 0.5 + ang_vel −0.002 | | | |
+
+## 1b. RUN LOG — every training run this session (per-run knobs + outcome)
+
+Only the **env/training knobs** differ run-to-run; the model above is constant. Camera-size and state-dim changes force a fresh-from-scratch run (encoder reshape).
+
+| Run dir | img | state | n_grad | gate rwd | collis | imag stages | replay | Outcome |
+|---|---|---|---|---|---|---|---|---|
+| **2026-06-13_21-29-13** (baseline) | 64 | 16 | 8 | flat | 10 N | [24-48] | 2M | **★ peak 30.7% lap, mean ~5** then eroded — BEST policy |
+| 2026-06-16_20-53-15 (finetune) | 64 | 16 | 8 | flat | 10 N | [24-64] | 2M | resume 36M + entropy-anneal + H→64 → **regressed** 30→19% |
+| 2026-06-17_08-21-04 (v2) | 96 | 22 | 4 | center[.5,1] | 25 N | [24-64] | 2M | **OOM-killed** (CPU RAM, 96px×2M ≈ 55 GB) |
+| 2026-06-17_21-37-22 (v2b) | 96 | 22 | 4 | center[.5,1] | 25 N | [24-64] | 1.2M | **18% lap peak, collapsed @30M** |
+| 2026-06-20_12-40-36 (v3) | 96 | 22 | 6 | center[.8,1] | 25 N | [24-64] | 1.2M | trailed (lap ~1% @12M), slower than v2b |
+| 2026-06-22_00-36-12 (abl96) | 96 | 16 | 8 | flat | 10 N | [24-48] | 1.2M | stuck single-gate **~0.73**, never advanced |
+| 2026-06-22_10-51-05 (abl96b) | 96 | 16 | 8 | flat | 10 N | [24-80] | 1.2M | stuck single-gate **~0.72** |
+| **2026-06-22_17-37-15** (current) | 64 | 16 | 8 | flat | 10 N | [24-80] | 2M | running; mean ~0.80 climbing (single-gate, 2.5M) |
+
+**What the run log shows:** only **64px** runs ever mastered single-gate / reached 30%; every **96px** run stalled at single-gate ~0.72 (same encoder capacity can't handle 2.25× pixels) → **96px HURTS**. Every change off the baseline (centering reward, state 22, n_grad 4/6, collision 25, finetune levers) **regressed** it. Lesson: don't bundle changes — single-variable tests vs the 30% baseline only.
 
 ---
 
@@ -76,9 +104,21 @@ b7f55f7 feat(train): finetune levers (entropy anneal, imag 48->64, --imag_start_
 
 ## 6. Next moves / open questions
 
-1. **Watch v3** to first verdict (~20-30M steps, ~1 day): does it beat 18% → 30%? If it caps ~18% again, perception+state alone aren't enough → revisit (the centering reward, or model size — the TSC paper suggests *smaller* models; or a pixel-recon/perceptual loss to force frame encoding).
-2. **Fix the deterministic-eval collapse** (1-line decouple in `act()`: always `sample=True` for the latent, only the *action* mode). Until then deploy/eval `--stochastic`.
-3. If v3 also collapses mid-run, consider entropy floor anneal late (`--entropy_min_final 0.2 ...`) — but note the earlier finetune-from-36M attempt with anneal REGRESSED, so be careful.
+**SkyDreamer paper lessons** (Verraest et al., Delft — DreamerV3 vision drone-racer, champion-level real-world; in `~/Downloads/clean_paper.md`). Things it does that we DON'T — all base-agnostic (apply to our PyTorch R2-Dreamer, no JAX needed), ranked:
+1. **Segmentation MASKS, not RGB.** Their visual obs is a binary gate mask (64×64 via GateNet). Far easier to learn than RGB. **Repo already supports** `--obs_mode mask` + has GateNet. ⭐ likeliest fix for our slow single-gate learning.
+2. **SHORT imagination horizon (16 steps, 0.18 s).** We've been *extending* to H=80 — backwards. Stop extending; go short.
+3. **3-gate flight-plan vector** (rel pos+yaw of next 3 gates) — richer than our reverted 1-gate lookahead; resolves visual ambiguity.
+4. **Smoothness reg on the policy MEAN** (λ=0.002) — kills bang-bang AND makes the deterministic policy smooth → would fix our deterministic-eval collapse.
+5. **Center-scaled gate reward + pre/post virtual gates** — they USE centering (we reverted it); works because paired with pre/post collision-volume gates. No collision penalty, no perception reward (both match our findings).
+6. **Staged schedule:** at 8M bump seq_len 64→256; at 13M drop entropy 3e-4→1e-5 + lr 4e-5→2e-6 (late fine-tune). train_ratio 128, replay 10M, default DreamerV3 12M model.
+
+**Recommended order (single-variable, vs the 30% baseline):**
+1. **`--obs_mode mask`** run (biggest, repo-ready). Kill RGB.
+2. **Short imag horizon** (~H=6-16; stop the [24..80] extension).
+3. **Fix deterministic-eval collapse** — 1-line decouple in `act()` (`dreamer/agent.py` ~L561): always `sample=True` for the latent, only the *action* is the mode. Until then eval/deploy `--stochastic`. (Or add the smoothness reg, which also fixes it.)
+4. Then 3-gate flight-plan; center-scaled reward + pre/post gates.
+
+**Open caveat:** R2-Dreamer is a hand-rolled PyTorch DreamerV3 port + Barlow Twins. If the masks/short-imag fixes still underperform, suspect **port faithfulness** vs official DreamerV3 (KL balance, free-bits, return-norm, symlog, WM-loss weights are easy to get subtly wrong).
 
 ---
 
