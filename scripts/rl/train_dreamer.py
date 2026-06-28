@@ -80,6 +80,13 @@ parser.add_argument("--entropy_anneal_start", type=int, default=None,
                     help="Env-step to begin annealing the entropy floor.")
 parser.add_argument("--entropy_anneal_end", type=int, default=None,
                     help="Env-step to finish annealing the entropy floor.")
+parser.add_argument("--lr_final", type=float, default=None,
+                    help="Late LR-anneal target. Decays lr->lr_final to stabilise the critic at large "
+                         "returns (fixes the spike-then-collapse). Use with --lr_anneal_start/_end.")
+parser.add_argument("--lr_anneal_start", type=int, default=None,
+                    help="Env-step to begin the LR anneal.")
+parser.add_argument("--lr_anneal_end", type=int, default=None,
+                    help="Env-step to finish the LR anneal.")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -164,6 +171,12 @@ def _load_config(args) -> DreamerConfig:
         cfg.entropy_anneal_start = args.entropy_anneal_start
     if args.entropy_anneal_end is not None:
         cfg.entropy_anneal_end = args.entropy_anneal_end
+    if args.lr_final is not None:
+        cfg.lr_final = args.lr_final
+    if args.lr_anneal_start is not None:
+        cfg.lr_anneal_start = args.lr_anneal_start
+    if args.lr_anneal_end is not None:
+        cfg.lr_anneal_end = args.lr_anneal_end
 
     cfg.obs_mode = args.obs_mode
     cfg.__post_init__()   # recompute image_channels from obs_mode

@@ -127,6 +127,14 @@ class DreamerConfig:
 
     # Optimizer (LaProp + AGC)
     lr: float = 4e-5
+    # Late LR anneal (critic-stability fix). Disabled by default (lr_final < 0). When set >= 0, the
+    # LR decays linearly lr -> lr_final across [lr_anneal_start, lr_anneal_end] env-steps. Motivation:
+    # runs spike to ~40% lap then COLLAPSE — critic_loss jumps + value falls at large returns (~150),
+    # i.e. lr=1e-4 is too high for the critic to track high returns late. SkyDreamer drops lr late
+    # (4e-5->2e-6) for exactly this. Applies to all three optimizers (wm/actor/critic).
+    lr_final: float = -1.0        # anneal target; < 0 => disabled (no-op)
+    lr_anneal_start: int = 0      # env-step to begin the LR anneal
+    lr_anneal_end: int = 1        # env-step to reach lr_final
     agc: float = 0.3
     pmin: float = 1e-3
     eps: float = 1e-20
@@ -613,14 +621,25 @@ class DreamerV3Agent:
         metrics = self._update_step(batch)
         self._update_count += 1
 
-        # LR warmup: scale LR linearly for first `warmup` grad steps. Use (count+1)/warmup so the
-        # final warmup step reaches the full lr (review lr-warmup-never-full: count/warmup peaks
-        # at (warmup-1)/warmup and never hits 1.0 before the gate closes).
-        if self._update_count < self.cfg.warmup:
-            lr_scale = min(1.0, (self._update_count + 1) / self.cfg.warmup)
+        # Effective LR = base lr * warmup_scale (early, by grad-step count) * anneal_scale (late, by
+        # env-step). Warmup ramps the LR up over the first `warmup` grad steps; the anneal ramps it
+        # down lr->lr_final across [lr_anneal_start, lr_anneal_end] env-steps to stabilise the critic
+        # at large returns (see DreamerConfig.lr_final). Both default to no-ops.
+        in_warmup = self._update_count < self.cfg.warmup
+        warmup_scale = min(1.0, (self._update_count + 1) / self.cfg.warmup) if in_warmup else 1.0
+        anneal_scale = 1.0
+        if self.cfg.lr_final >= 0.0 and self.cfg.lr_anneal_end > self.cfg.lr_anneal_start:
+            frac = (self._step - self.cfg.lr_anneal_start) / (self.cfg.lr_anneal_end - self.cfg.lr_anneal_start)
+            frac = min(max(frac, 0.0), 1.0)
+            eff = self.cfg.lr + frac * (self.cfg.lr_final - self.cfg.lr)
+            anneal_scale = eff / self.cfg.lr
+        if in_warmup or anneal_scale != 1.0:
+            eff_lr = self.cfg.lr * warmup_scale * anneal_scale
             for opt in (self.opt_wm, self.opt_actor, self.opt_critic):
                 for pg in opt.param_groups:
-                    pg["lr"] = self.cfg.lr * lr_scale
+                    pg["lr"] = eff_lr
+            if metrics is not None:
+                metrics["opt/lr"] = eff_lr
 
         # Soft-update target critic
         _soft_update(self.target_critic, self.critic, self.cfg.slow_target_fraction)
