@@ -80,6 +80,10 @@ parser.add_argument("--entropy_anneal_start", type=int, default=None,
                     help="Env-step to begin annealing the entropy floor.")
 parser.add_argument("--entropy_anneal_end", type=int, default=None,
                     help="Env-step to finish annealing the entropy floor.")
+parser.add_argument("--entropy_floor_weight", type=float, default=None,
+                    help="Weight on the entropy-floor penalty F.relu(entropy_min - entropy). Default 1e-2. "
+                         "Raise (e.g. 5e-2) to restore the floor's grip when a lower actor lr (split-LR) "
+                         "weakens its restoring force and entropy drifts below the floor (iteration 2).")
 parser.add_argument("--lr_final", type=float, default=None,
                     help="Late LR-anneal target. Decays lr->lr_final to stabilise the critic at large "
                          "returns (fixes the spike-then-collapse). Use with --lr_anneal_start/_end.")
@@ -187,6 +191,8 @@ def _load_config(args) -> DreamerConfig:
         cfg.lr_actor = args.lr_actor
     if args.lr_critic is not None:
         cfg.lr_critic = args.lr_critic
+    if args.entropy_floor_weight is not None:
+        cfg.entropy_floor_weight = args.entropy_floor_weight
 
     cfg.obs_mode = args.obs_mode
     cfg.__post_init__()   # recompute image_channels from obs_mode
