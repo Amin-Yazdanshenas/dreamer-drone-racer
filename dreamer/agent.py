@@ -135,6 +135,13 @@ class DreamerConfig:
     lr_final: float = -1.0        # anneal target; < 0 => disabled (no-op)
     lr_anneal_start: int = 0      # env-step to begin the LR anneal
     lr_anneal_end: int = 1        # env-step to reach lr_final
+    # Split LR (collapse fix, see HANDOFF §2a). DreamerV3/SkyDreamer keep wm at `lr` but run the
+    # actor/critic ~3x cooler (wm 1e-4, ac 3e-5). 06-30 log-diagnosis: the terminal collapse is a
+    # value/return runaway (critic-led) + an actor-sharpening crater — both AC-side, wm losses stay
+    # flat. Lowering the critic lr damps the runaway; lowering the actor lr damps the sharpening.
+    # < 0 => fall back to `lr` (no-op). warmup + lr_final anneal scale each base lr proportionally.
+    lr_actor: float = -1.0
+    lr_critic: float = -1.0
     agc: float = 0.3
     pmin: float = 1e-3
     eps: float = 1e-20
@@ -413,12 +420,20 @@ class DreamerV3Agent:
         # Return EMA (for value normalisation)
         self.return_ema = ReturnEMA(alpha=cfg.return_ema_alpha).to(self.device)
 
-        self.opt_wm = LaProp(self._get_wm_params(), lr=cfg.lr,
+        # Per-optimizer base LR (split-LR support). actor/critic fall back to cfg.lr when < 0.
+        self._lr_wm = cfg.lr
+        self._lr_actor = cfg.lr_actor if cfg.lr_actor >= 0.0 else cfg.lr
+        self._lr_critic = cfg.lr_critic if cfg.lr_critic >= 0.0 else cfg.lr
+        self.opt_wm = LaProp(self._get_wm_params(), lr=self._lr_wm,
                              betas=(cfg.beta1, cfg.beta2), eps=cfg.eps)
-        self.opt_actor = LaProp(self.actor.parameters(), lr=cfg.lr,
+        self.opt_actor = LaProp(self.actor.parameters(), lr=self._lr_actor,
                                 betas=(cfg.beta1, cfg.beta2), eps=cfg.eps)
-        self.opt_critic = LaProp(self.critic.parameters(), lr=cfg.lr,
+        self.opt_critic = LaProp(self.critic.parameters(), lr=self._lr_critic,
                                  betas=(cfg.beta1, cfg.beta2), eps=cfg.eps)
+        # (optimizer, base_lr) pairs for the warmup/anneal scheduler.
+        self._opt_base_lrs = [(self.opt_wm, self._lr_wm),
+                              (self.opt_actor, self._lr_actor),
+                              (self.opt_critic, self._lr_critic)]
 
         # AMP GradScaler
         _scaler_enabled = (cfg.amp_dtype == "float16" and self.device.type == "cuda")
@@ -634,12 +649,14 @@ class DreamerV3Agent:
             eff = self.cfg.lr + frac * (self.cfg.lr_final - self.cfg.lr)
             anneal_scale = eff / self.cfg.lr
         if in_warmup or anneal_scale != 1.0:
-            eff_lr = self.cfg.lr * warmup_scale * anneal_scale
-            for opt in (self.opt_wm, self.opt_actor, self.opt_critic):
+            scale = warmup_scale * anneal_scale
+            for opt, base in self._opt_base_lrs:
                 for pg in opt.param_groups:
-                    pg["lr"] = eff_lr
+                    pg["lr"] = base * scale
             if metrics is not None:
-                metrics["opt/lr"] = eff_lr
+                metrics["opt/lr"] = self._lr_wm * scale
+                metrics["opt/lr_actor"] = self._lr_actor * scale
+                metrics["opt/lr_critic"] = self._lr_critic * scale
 
         # Soft-update target critic
         _soft_update(self.target_critic, self.critic, self.cfg.slow_target_fraction)

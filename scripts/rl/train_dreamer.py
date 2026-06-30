@@ -87,6 +87,12 @@ parser.add_argument("--lr_anneal_start", type=int, default=None,
                     help="Env-step to begin the LR anneal.")
 parser.add_argument("--lr_anneal_end", type=int, default=None,
                     help="Env-step to finish the LR anneal.")
+parser.add_argument("--lr_actor", type=float, default=None,
+                    help="Split-LR: actor optimizer base LR (DreamerV3/SkyDreamer use 3e-5 while wm stays "
+                         "1e-4). Damps the actor-sharpening collapse. Default falls back to --lr/cfg.lr.")
+parser.add_argument("--lr_critic", type=float, default=None,
+                    help="Split-LR: critic optimizer base LR (3e-5). Damps the value/return runaway (the "
+                         "terminal collapse, see HANDOFF §2a). Default falls back to --lr/cfg.lr.")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -177,6 +183,10 @@ def _load_config(args) -> DreamerConfig:
         cfg.lr_anneal_start = args.lr_anneal_start
     if args.lr_anneal_end is not None:
         cfg.lr_anneal_end = args.lr_anneal_end
+    if args.lr_actor is not None:
+        cfg.lr_actor = args.lr_actor
+    if args.lr_critic is not None:
+        cfg.lr_critic = args.lr_critic
 
     cfg.obs_mode = args.obs_mode
     cfg.__post_init__()   # recompute image_channels from obs_mode
