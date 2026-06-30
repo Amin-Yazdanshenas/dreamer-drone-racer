@@ -1,6 +1,6 @@
 # Handoff — DreamerV3 Drone Racing
 
-**Last updated:** 2026-06-23
+**Last updated:** 2026-06-30
 **Repo:** `git@github.com:Amin-Yazdanshenas/dreamer-drone-racer.git`, branch `master`
 **Active agent:** R2-Dreamer — a **PyTorch** DreamerV3 variant (Barlow-Twins repr loss + informed/privileged 12-dim decoder, NO image-reconstruction, NO JAX). 256 envs.
 **Compute:** training runs on a REMOTE box `avl-super@100.117.154.65` (RTX 4090 24 GB VRAM, **62 GB host RAM**). The local machine is a 6 GB RTX 3060 laptop — too small for full training; only used for short headless evals/diagnostics.
@@ -9,16 +9,19 @@
 
 ---
 
-## 1. Current state (what's running NOW)
+## 1. Current state (06-30: NOTHING training — GPU idle)
 
-- **Run `2026-06-22_17-37-15`** (commit `7cdf203`) — the proven **64px 30% baseline + ONLY the extended imag_horizon curriculum [24..80]**. Fresh from scratch, `--max_steps 45M`, log `~/train_64imag.log`.
-- Tests one variable: does **more planning horizon** (old run maxed at H=48, plateaued ~30%) push chaining past 30%?
-- Status ~06-23: healthy (proc alive, GPU ~60-90%, VRAM ~18 GB, RAM ~39 GB capped). Step ~2.5M, mean ~0.80 gates — still in the single-gate-learning phase (imag stays at 24 until mean ≥0.85). Slow (~0.3M steps/hr at n_grad 8).
+No run active. Last run (`lr-anneal`, fresh baseline + late lr anneal) was **killed at 11M — the CRITIC DIVERGED** (value blew up to **502**, policy collapsed to mean 0.44, no recovery). See §2a for the big finding.
+
+**Best policy = ~40% lap** (NOT 30% — see §2a): `2026-06-23_00-54-13/checkpoints/agent_best.pt` (smoothed 6.87 gates/ep, the exact-baseline run's peak before it collapsed).
+
+**Next move (recommended, not yet started): SPLIT THE LR** — wm 1e-4, actor+critic **3e-5** (DreamerV3/SkyDreamer values). Our single `lr=1e-4` runs the actor/critic 3.3× too hot → critic diverges → spike-then-collapse. Code has 3 separate optimizers already.
 
 ### Best checkpoints / fallbacks (all on remote)
 | Policy | Path | Note |
 |---|---|---|
-| **Best overall — 30% lap** | `2026-06-13_21-29-13/checkpoints/agent_snapshot_36M.pt` | the proven peak; KEEP |
+| **★ Best — ~40% lap** | `2026-06-23_00-54-13/checkpoints/agent_best.pt` | exact-baseline peak (smoothed 6.87 gates); beats the old 30% |
+| old 30% lap | `2026-06-13_21-29-13/checkpoints/agent_snapshot_36M.pt` | original peak; KEEP |
 | v2b ~18% peak | `2026-06-17_21-37-22/checkpoints/agent_best.pt` | 96px full-package (capped low) |
 
 ## 1a. Shared model (R2-Dreamer — constant across ALL runs below)
@@ -46,9 +49,27 @@ Only the **env/training knobs** differ run-to-run; the model above is constant. 
 | 2026-06-20_12-40-36 (v3) | 96 | 22 | 6 | center[.8,1] | 25 N | [24-64] | 1.2M | trailed (lap ~1% @12M), slower than v2b |
 | 2026-06-22_00-36-12 (abl96) | 96 | 16 | 8 | flat | 10 N | [24-48] | 1.2M | stuck single-gate **~0.73**, never advanced |
 | 2026-06-22_10-51-05 (abl96b) | 96 | 16 | 8 | flat | 10 N | [24-80] | 1.2M | stuck single-gate **~0.72** |
-| **2026-06-22_17-37-15** (current) | 64 | 16 | 8 | flat | 10 N | [24-80] | 2M | running; mean ~0.80 climbing (single-gate, 2.5M) |
+| 2026-06-22_17-37-15 (64+H80) | 64 | 16 | 8 | flat | 10 N | [24-80] | 2M | reverted to clean 64 baseline mid-run; see 06-23 run |
+| **2026-06-23_00-54-13** (EXACT baseline) | 64 | 16 | 8 | flat | 10 N | [24-48] | 2M | **★ reproduced AND spiked to ~40% lap @36M (mean 6.3), THEN COLLAPSED** to ~4% — `agent_best.pt` = the 40% peak |
+| 2026-06-28 (lr-anneal) | 64 | 16 | 8 | flat | 10 N | [24-48] | 2M | baseline + lr-anneal 1e-4→2e-5 @26-34M. **CRITIC DIVERGED @8-11M (value→502)**, killed. Anneal never engaged (too late). |
 
-**What the run log shows:** only **64px** runs ever mastered single-gate / reached 30%; every **96px** run stalled at single-gate ~0.72 (same encoder capacity can't handle 2.25× pixels) → **96px HURTS**. Every change off the baseline (centering reward, state 22, n_grad 4/6, collision 25, finetune levers) **regressed** it. Lesson: don't bundle changes — single-variable tests vs the 30% baseline only.
+**What the run log shows:** only **64px** runs ever chained well; **96px** stalled at single-gate ~0.72 (premature call — see note) → treat 96px as hurting for now. The 64px baseline is **reproducible to a ~40% peak** (higher than the 30% we were anchored to) but **collapses** after peaking. Don't bundle changes — single-variable tests vs the baseline only, and expect **±10pt run-to-run variance** (the exact peak isn't deterministic).
+
+> Correction logged: the "96px stuck ~0.72" calls were made at ~3M, but the 64px baseline shows single-gate breakthrough happens ~4-5M — so 96px was likely judged too early, not necessarily broken. And early "lap %" reads used 2M windows that SMOOTHED AWAY a sharp 40% spike — always check `NEW BEST smoothed gates/ep` (the 600-ep peak detector) + 0.5M bins.
+
+---
+
+## 2a. THE KEY FINDING (06-27→30): ceiling is ~40%, problem is CRITIC DIVERGENCE
+
+1. **The ceiling is ~40% lap, not 30%.** The exact-baseline run (`2026-06-23`) spiked to **~40% lap / mean 6.3 / value ~153 at 36M** — beating the original's 30.7%. My 2M-windowed text reads smoothed this spike to "21%"; the 0.5M-bin graph + the `NEW BEST smoothed gates/ep=6.87` log line revealed it. **`agent_best.pt` from that run is the new best policy.**
+2. **The real bottleneck is the COLLAPSE, not the ceiling.** Runs climb high then crash: baseline 40%→4% @36M; v2b 18%→? @30M; lr-anneal seed diverged @8M. Recurring.
+3. **Root cause = the CRITIC diverges.** Fine-bin diagnostics at each collapse: `critic_loss` spikes (0.68→0.87, or 1.9), `imag/value_mean` blows up or craters (→502, or 153→90), and the actor/entropy follow (consequences). `action_sat_frac` barely moves → NOT entropy-collapse-led. It's **value/critic instability at (or before) large returns**.
+4. **Why: our single `lr=1e-4` runs the actor/critic too hot.** DreamerV3 + SkyDreamer use a **split lr — world-model 1e-4, actor/critic 3e-5**. We apply 1e-4 to all three optimizers → the critic (3.3× too hot) diverges. The yaml comment literally says "paper splits wm=1e-4, ac=3e-5" — we didn't.
+5. **The late lr-anneal (26M) was the WRONG fix** — the critic can diverge at 8M (before any anneal). The robust fix is a **lower base actor/critic lr from the start.**
+
+**RECOMMENDED NEXT RUN (not started): split the lr.** Keep wm lr 1e-4, set actor+critic lr to **3e-5**. Single conceptual change vs baseline. Code has `opt_wm`/`opt_actor`/`opt_critic` already — add `lr_actor`/`lr_critic` cfg fields (or reuse the new lr-anneal infra). This should stop the critic divergence and let it HOLD the ~40% peak instead of spiking-and-collapsing.
+
+(A late lr anneal CLI exists from this session — `--lr_final/--lr_anneal_start/--lr_anneal_end`, commit `0bfc257`, disabled by default — but the data says split-from-the-start is the better lever.)
 
 ---
 
