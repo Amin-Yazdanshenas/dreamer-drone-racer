@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Council — Split-LR + Resume-Validation</title>
+<style>
+  :root{
+    --bg:#fafafa; --card:#ffffff; --ink:#1a1a1a; --mut:#6b7280; --line:#e5e7eb;
+    --accent:#4f46e5; --good:#059669; --warn:#d97706; --bad:#dc2626;
+    --c1:#dc2626; --c2:#0891b2; --c3:#7c3aed; --c4:#64748b; --c5:#059669;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.55;padding:32px 16px}
+  .wrap{max-width:860px;margin:0 auto}
+  h1{font-size:24px;margin:0 0 4px}
+  .sub{color:var(--mut);font-size:13px;margin-bottom:24px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:22px 24px;margin-bottom:18px}
+  .q{border-left:4px solid var(--accent)}
+  .q h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 10px}
+  .q p{margin:6px 0;font-size:14px}
+  .verdict h2{font-size:15px;margin:20px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  .verdict h2:first-child{margin-top:0}
+  .verdict p,.verdict li{font-size:14.5px}
+  .pill{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:99px;
+    color:#fff;margin-right:6px;vertical-align:middle}
+  .rec{background:#f5f3ff;border:1px solid #ddd6fe;border-radius:10px;padding:16px 18px;margin-top:8px}
+  .first{background:#ecfdf5;border:1px solid #a7f3d0;border-radius:10px;padding:16px 18px;margin-top:8px}
+  .first strong,.rec strong{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.05em;
+    color:var(--mut);margin-bottom:6px}
+  /* spectrum */
+  .spec{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+  .row{display:flex;align-items:center;gap:10px;font-size:13px}
+  .name{width:128px;font-weight:600;flex:none}
+  .bar{flex:1;height:10px;border-radius:6px;background:linear-gradient(90deg,#fee2e2,#fef3c7,#d1fae5)}
+  .dot{width:14px;height:14px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px var(--line);position:relative;flex:none}
+  .legend{display:flex;justify-content:space-between;font-size:11px;color:var(--mut);margin:2px 0 0 138px}
+  .stance{width:150px;flex:none;font-size:12px;color:var(--mut);text-align:right}
+  details{border:1px solid var(--line);border-radius:10px;margin-bottom:10px;overflow:hidden}
+  summary{cursor:pointer;padding:13px 16px;font-weight:600;font-size:14px;list-style:none;
+    display:flex;align-items:center;gap:8px;background:#fcfcfd}
+  summary::-webkit-details-marker{display:none}
+  summary::before{content:"▸";color:var(--mut);font-size:12px}
+  details[open] summary::before{content:"▾"}
+  .body{padding:4px 18px 16px;font-size:14px;color:#262626}
+  .tag{font-size:11px;font-weight:600;color:#fff;padding:2px 8px;border-radius:6px}
+  .ftr{color:var(--mut);font-size:12px;text-align:center;margin-top:28px}
+  code{background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:12.5px}
+  .key{font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>LLM Council Verdict</h1>
+  <div class="sub">Split-LR fix + resume-from-peak validation for the R2-Dreamer collapse · 2026-06-30</div>
+
+  <div class="card q">
+    <h2>The Question</h2>
+    <p>R2-Dreamer drone-racer trains to a ~40% lap peak then <b>collapses</b> (critic_loss rises,
+    value destabilizes; one run's critic diverged to 502 terminally). Three optimizers share a single
+    <code>lr=1e-4</code>; reference impls split (wm 1e-4, actor-critic 3e-5). Runs are nondeterministic
+    (~5 days each). <b>Proposed:</b> (1) split the LR to 3e-5 on actor/critic; (2) build policy-based
+    replay refill and <b>resume the banked 40% checkpoint</b> with split LR to test in <i>hours</i>
+    whether it holds; (3) late entropy anneal if saturation persists. <b>How effective?</b></p>
+  </div>
+
+  <div class="card verdict">
+    <h2>Bottom line</h2>
+    <p>The council <b>endorses splitting the LR</b> (cheap, free, reference-validated) but
+    <b>rejects the resume-from-peak experiment as designed</b> — it cannot produce a readable signal.
+    The unanimous miss caught in peer review: <b>the answer is already in the banked TensorBoard logs</b>;
+    diagnose before spending GPU.</p>
+
+    <h2>Where the Council Agrees</h2>
+    <ul>
+      <li><span class="key">Split LR is worth doing but treats a symptom.</span> 10-min change, numbers
+        from DreamerV3/SkyDreamer. But lowering actor/critic LR <i>slows</i> divergence, it doesn't remove
+        the mechanism — expect <i>later</i> collapses, not no collapses. (Contrarian, First-Principles, Outsider, Executor)</li>
+      <li><span class="key">The resume-from-peak test is broken.</span> Collapses arrive 29–36M steps
+        <i>after</i> peak; "holds for hours" (&lt;1M steps) proves nothing against a slow-onset failure.
+        Policy-refill warm-starts the <i>good</i> policy → survivorship bias → false positive. (Contrarian, Executor)</li>
+      <li><span class="key">Reproducibility first.</span> Unseeded + nondeterministic = any single result is
+        noise; you cannot attribute a recovery to the LR. Seed the env before changing one variable. (Executor, Contrarian)</li>
+      <li><span class="key">Skip the entropy anneal for now.</span> Saturation moved in only 1 of 3 collapses —
+        a symptom, not the driver. One variable at a time. (First-Principles, Outsider, Contrarian)</li>
+    </ul>
+
+    <h2>Where the Council Clashes</h2>
+    <p><b>Is collapse one mechanism or two?</b> The Contrarian reads the data as <i>two diseases</i>:
+    monotonic critic blow-up (the 502 run = genuinely too-hot optimizer) vs. recoverable crater (critic
+    chasing a target the bang-bang actor moved). One LR knob can't fix both. The First-Principles thinker
+    counters: it's <i>one</i> root — a nonstationary value target — and the fix isn't LR alone but the
+    DreamerV3 stabilizers (return normalization, slow-target critic, free-bit KL). Both can be right: LR is
+    necessary, not sufficient.</p>
+    <p><b>How optimistic to be?</b> The Expansionist puts ~70% on the resume holding and reframes collapse as
+    a publishable "research asset." Every other advisor — and all five peer reviewers — rejected this as the
+    biggest blind spot: it sells iteration-economy upside while the test it relies on can't be read.</p>
+
+    <h2>Blind Spots the Peer Review Caught</h2>
+    <ul>
+      <li><span class="key">The answer is already banked — for free.</span> All five reviewers independently
+        landed here: pull the existing TB curves at the 8M / 29M / 36M collapse onsets and overlay
+        <b>world-model / repr / KL loss</b> and <b>imagined value-target vs. realized return</b>. If WM/repr
+        drift <i>leads</i> the critic, the LR is rearranging deck chairs. Zero GPU. Decides the whole question.</li>
+      <li><span class="key">Are the DreamerV3 critic stabilizers even present?</span> No-image-recon R2-Dreamer's
+        critic regresses on imagined rollouts; without a slow-target critic + return EMA, the value target is
+        nonstationary by construction. Verify these exist before touching LR.</li>
+      <li><span class="key">The replay buffer is the hidden confound.</span> Unchecckpointed episode-level
+        replay near the peak is stale/off-distribution — a plausible collapse driver independent of LR, and it
+        contaminates any resume test regardless of seeding.</li>
+    </ul>
+
+    <h2>The Recommendation</h2>
+    <div class="rec">
+      <strong>Verdict</strong>
+      <p style="margin:0">Do <b>not</b> launch the resume-from-peak run as designed — it's an unreadable test.
+      Instead, in order: <b>(1)</b> mine the banked TB logs at the three collapse onsets (free, today) — overlay
+      wm/repr/KL loss + value-target-vs-realized-return + saturation; determine whether representation drift
+      <i>leads</i> the critic and whether it's one mechanism or two. <b>(2)</b> Confirm the slow-target critic +
+      return-EMA are wired. <b>(3)</b> Ship split-LR <i>and</i> a global seed together (≈2 hrs). <b>(4)</b> Launch
+      <i>one</i> fresh seeded split-LR run. Keep the resume experiment only as a same-seed A/B <i>after</i> a fresh
+      run collapses. Realistic effect of split-LR alone: delays the collapse, ~30–40% chance it removes it; the
+      log-diagnosis is what tells you if you're even turning the right knob.</p>
+    </div>
+
+    <h2>The One Thing to Do First</h2>
+    <div class="first">
+      <strong>Today, zero GPU</strong>
+      <p style="margin:0">Open the banked TensorBoard curves at the collapse onsets and check whether
+      <b>world-model / repr loss rises before the critic does</b>. That single overlay decides whether "LR" is
+      the right lever or a distraction — and it costs nothing.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 14px">
+      Advisor Positions — does the plan, as written, work?</h2>
+    <div class="spec">
+      <div class="row"><span class="name" style="color:var(--c1)">Contrarian</span>
+        <span class="bar"></span><span class="dot" style="margin-left:-6%;background:var(--c1)"></span>
+        <span class="stance">Misreads data; test gives false +</span></div>
+      <div class="row"><span class="name" style="color:var(--c3)">First Principles</span>
+        <span class="bar"></span><span class="dot" style="margin-left:-32%;background:var(--c3)"></span>
+        <span class="stance">Wrong frame; fix the stabilizers</span></div>
+      <div class="row"><span class="name" style="color:var(--c4)">Outsider</span>
+        <span class="bar"></span><span class="dot" style="margin-left:-20%;background:var(--c4)"></span>
+        <span class="stance">Symptom, not cause; two diseases</span></div>
+      <div class="row"><span class="name" style="color:var(--c2)">Executor</span>
+        <span class="bar"></span><span class="dot" style="margin-left:-14%;background:var(--c2)"></span>
+        <span class="stance">Split-LR yes, resume = trap; seed first</span></div>
+      <div class="row"><span class="name" style="color:var(--c5)">Expansionist</span>
+        <span class="bar"></span><span class="dot" style="margin-left:42%;background:var(--c5)"></span>
+        <span class="stance">~70% holds; it's a research asset</span></div>
+    </div>
+    <div class="legend"><span>← plan is flawed / wrong knob</span><span>plan works as written →</span></div>
+    <p style="font-size:12.5px;color:var(--mut);margin:16px 0 0">4 of 5 advisors and all 5 peer reviewers
+    judged the resume-validation design unreadable. The Expansionist was the lone optimist and was flagged as
+    the council's biggest blind spot.</p>
+  </div>
+
+  <h2 style="font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:26px 0 12px">
+    Full advisor responses</h2>
+
+  <details>
+    <summary><span class="tag" style="background:var(--c1)">Contrarian</span> Misreading the evidence; the test hands a false positive</summary>
+    <div class="body">
+      <p>The split-LR fix is plausible but you are misreading the evidence, and the validation design has a
+      hole that will hand you a false positive.</p>
+      <p>The data does not say "critic LR too high." It says critic_loss <b>rises</b> at collapse
+      (1.27→1.79, 0.69→0.86). A too-hot critic diverges <i>monotonically</i> (your 8M run: value→502). Your two
+      recoverable craters show critic loss rising <i>then recovering</i> — the critic chasing a target that
+      moved, not an optimizer blowing up. The mover is the actor/world-model: bang-bang policy
+      (sat 0.18→0.30) shifts the state distribution, value targets jump (60→2.7 is a collapse in returns,
+      i.e. the policy got worse first), critic loss rises tracking it. Lowering critic LR makes it track the
+      moving target <b>slower</b>, which can <i>deepen</i>, not prevent, the crater. And baseline-64px collapsed
+      with NO saturation change and a HIGHER value — different mechanism, same LR. One fix, two mechanisms:
+      at least one won't respond.</p>
+      <p>The validation design is the real flaw. You resume the lucky 40% peak and watch "in hours." But
+      collapses arrive at 29M and 36M — tens of millions of steps after peak. Holding for hours proves
+      nothing; the failure is slow-onset. You'll declare victory and eat the same collapse five days later.
+      Worse: policy-refill warm-starts the buffer with the GOOD policy — survivorship bias baked into the
+      test. Run controls: split-LR AND critic-only-LR AND a third seed.</p>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="tag" style="background:var(--c3)">First Principles</span> Right instinct, wrong frame — you dropped the stabilizers</summary>
+    <div class="body">
+      <p>Three optimizers, one shared symptom: critic_loss elevated and spiking right at every collapse.
+      That's not three bugs, it's one — the critic is chasing a target it cannot pin down.</p>
+      <p>Dropping actor+critic to 3e-5 slows the divergence, it doesn't remove the mechanism. DreamerV3
+      doesn't pair the 3e-5 with a lower LR alone — it ships percentile return normalization, critic
+      EMA/slow-target regularization, and free-bit KL <i>specifically because the value target is
+      nonstationary.</i> You bolted on a single LR and inherited the instability the rest of the recipe was
+      designed to suppress. The real question: is your critic regularized like DreamerV3's, or did you port
+      the LR and drop the stabilizers? Check <code>ReturnEMA</code> and whether you have a slow/target critic
+      before touching LR.</p>
+      <p>The resume-and-test idea is genuinely smart and the actual experiment that matters. A 5-day blind run
+      where "early/late/oscillate is luck" is a slot machine, not an experiment. Policy-based replay refill
+      turning a 5-day question into a 3-hour one is the highest-leverage thing on the list — do it first. But
+      know what resume-from-peak tests: holding a banked peak is <i>easier</i> than reaching it. A split-LR
+      resume that holds 40% proves stability, not that you'd ever climb there from scratch. Save the
+      entropy-floor anneal — saturation appeared in only one of three collapses. One variable at a time.</p>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="tag" style="background:var(--c4)">Outsider</span> Why does a converged policy spontaneously fall apart?</summary>
+    <div class="body">
+      <p>The split LR will help at the margin, but everyone here is debugging the symptom and skipping the
+      obvious question: why does a CONVERGED policy that completes 40% of laps spontaneously fall apart?
+      Stable RL doesn't do that. Lowering LR to 3e-5 slows divergence — you'll likely buy yourself later
+      collapses, and wait 5 days to find out.</p>
+      <p>The unexamined assumption: that the collapse originates in the OPTIMIZER. Three failure modes
+      (critic loss creeping up, critic exploding to 502, saturation jumping) treated as one knob. The
+      saturation signal — run one jumped 0.18→0.30, run two stayed flat at 0.10. That's two DIFFERENT
+      diseases. A single LR change can't fix both.</p>
+      <p>And nobody's questioning this: your environment is unseeded and nondeterministic, and you've
+      concluded collapse-timing is "luck." But if identical configs diverge into qualitatively different
+      failures, that's not bad luck — that's a system on a knife's edge where tiny perturbations decide the
+      outcome. That points to a feedback loop (world-model drift → bad imagined returns → critic chases them →
+      actor exploits model error → worse data → worse model), not an LR 3× too high. Before burning 5 days:
+      log per-update what the critic is actually regressing onto. Is the value target diverging from realized
+      return? Test the resume plan first — it's cheap — but don't pre-commit to "LR was the problem."</p>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="tag" style="background:var(--c2)">Executor</span> Ship split-LR; the resume shortcut is a trap — seed first</summary>
+    <div class="body">
+      <p>Three optimizers already exist. Splitting LR is a 10-minute change. Do it — free, and DreamerV3/
+      SkyDreamer already validated those exact numbers.</p>
+      <p>The resume-validation shortcut is the trap. <code>agent_best.pt</code> is a known-lucky peak that
+      already collapsed once. Even with a perfect refill, you cannot distinguish "split LR held the peak" from
+      "this resume got lucky" — runs are non-reproducible by your own admission. A resume that holds 3 hours
+      tells you nothing; one that collapses tells you nothing either (baseline collapsed at 36M, not at resume
+      time). Net-new code to buy a signal you can't read. Motion, not progress.</p>
+      <p>Monday: (1) ship split-LR (10 min). (2) Before anything else, spend 2 hours adding a global seed +
+      <code>torch.use_deterministic_algorithms</code> and seeding the env — you'll never debug oscillatory
+      collapse without reproducibility; highest-leverage 2 hours on the board. (3) Kick off ONE fresh seeded
+      run with split LR. (4) Build the policy-refill in parallel, but only spend it on a resume <i>after</i>
+      the fresh run also collapses, as an A/B on the same seed. Split-LR + seed is the cheap, readable test.</p>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="tag" style="background:var(--c5)">Expansionist</span> You've stumbled onto a research asset <span style="color:var(--warn);font-weight:600;font-size:11px">⚑ flagged: biggest blind spot</span></summary>
+    <div class="body">
+      <p>Split the LR and you'll buy stability — but you're treating this like a bug fix when you've stumbled
+      onto a research asset. Your critic_loss spikes + value blowups are a measurable, repeatable instability
+      signature. Three bigger plays the plan undersells:</p>
+      <p>(1) <b>Checkpoint the replay buffer</b> and you unlock the entire iteration economy — persisted replay
+      turns every run into a warm-startable branch point. ~6 experiments/month to dozens. The LR-split isn't
+      the win; the resumability is.<br>
+      (2) <b>Collapse is a curriculum signal</b> — runs collapse near the same return ceiling because the policy
+      outgrows the value function's calibration range (value 60→150→502). Treat the collapse boundary as where
+      to inject difficulty. A free "ready for harder" detector.<br>
+      (3) <b>Determinism is upside</b> — seed env + replay and the oscillations become ablatable, collapse→recovery
+      a publishable phenomenon. A 40%-lap policy on one 4090 from-scratch is already strong.</p>
+      <p>Expected effectiveness: split-LR + resume holds the peak ~70% likely. But the real ROI is the
+      iteration loop you're building, not this one save.</p>
+      <p style="color:var(--mut);font-size:12.5px"><i>Peer-review note: all five reviewers flagged this response
+      as the council's biggest blind spot — it accepts the split-LR framing wholesale and sells upside while
+      the validation test it relies on can't be read.</i></p>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="tag" style="background:var(--mut)">Peer Review</span> What the cross-examination surfaced</summary>
+    <div class="body">
+      <p><b>Strongest (unanimous): the Contrarian.</b> The only response that mechanistically separates the two
+      failure modes (monotonic 502 divergence vs. recoverable crater from a moving target) <i>and</i> kills the
+      validation design: collapses land 29–36M steps after peak, so "holds for hours" proves nothing against a
+      slow-onset failure; warm-starting the good policy is survivorship bias.</p>
+      <p><b>Biggest blind spot (unanimous): the Expansionist.</b> Reframes a divergence as a "research asset"
+      and quotes ~70% without engaging the failure mechanism or the unreadable test.</p>
+      <p><b>What ALL FIVE missed (the convergent insight):</b> the discriminating diagnostic is <i>already
+      banked in TensorBoard</i> — no 5-day run needed. Overlay world-model / repr / KL loss and imagined
+      value-target vs. realized return at the 8M/29M/36M onsets. If representation drift <i>leads</i> the
+      critic divergence, the LR is rearranging deck chairs. Reviewers also flagged: verify the slow-target
+      critic + return-EMA exist; and the uncheckpointed replay buffer is a hidden confound that contaminates
+      any resume test regardless of seeding.</p>
+    </div>
+  </details>
+
+  <div class="ftr">
+    Generated 2026-06-30_01-50-05 · 5 advisors → anonymized peer review → chairman synthesis<br>
+    Counciled: split-LR fix + policy-refill resume-validation for the R2-Dreamer lap-collapse
+  </div>
+</div>
+</body>
+</html>

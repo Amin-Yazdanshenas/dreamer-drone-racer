@@ -11,7 +11,7 @@
 
 ## 1. Current state (06-30: NOTHING training — GPU idle)
 
-No run active. Last run (`lr-anneal`, fresh baseline + late lr anneal) was **killed at 11M — the CRITIC DIVERGED** (value blew up to **502**, policy collapsed to mean 0.44, no recovery). See §2a for the big finding.
+No run active. Last run (`lr-anneal`, fresh baseline + late lr anneal, `2026-06-28_00-17-01`) was **killed at 11M — VALUE/RETURN RUNAWAY** (`return/scale` 108→1567, `imag/value` raw max **802**, gates→0, no recovery). 06-30 log-diagnosis: **world-model losses stay flat through every collapse** — not a WM problem; two collapse families (actor-sharpening + value runaway). See §2a + `collapse_diagnosis.png`.
 
 **Best policy = ~40% lap** (NOT 30% — see §2a): `2026-06-23_00-54-13/checkpoints/agent_best.pt` (smoothed 6.87 gates/ep, the exact-baseline run's peak before it collapsed).
 
@@ -59,17 +59,26 @@ Only the **env/training knobs** differ run-to-run; the model above is constant. 
 
 ---
 
-## 2a. THE KEY FINDING (06-27→30): ceiling is ~40%, problem is CRITIC DIVERGENCE
+## 2a. THE KEY FINDING (06-27→30): ceiling ~40%; collapse = TWO families, WM not implicated
 
 1. **The ceiling is ~40% lap, not 30%.** The exact-baseline run (`2026-06-23`) spiked to **~40% lap / mean 6.3 / value ~153 at 36M** — beating the original's 30.7%. My 2M-windowed text reads smoothed this spike to "21%"; the 0.5M-bin graph + the `NEW BEST smoothed gates/ep=6.87` log line revealed it. **`agent_best.pt` from that run is the new best policy.**
-2. **The real bottleneck is the COLLAPSE, not the ceiling.** Runs climb high then crash: baseline 40%→4% @36M; v2b 18%→? @30M; lr-anneal seed diverged @8M. Recurring.
-3. **Root cause = the CRITIC diverges.** Fine-bin diagnostics at each collapse: `critic_loss` spikes (0.68→0.87, or 1.9), `imag/value_mean` blows up or craters (→502, or 153→90), and the actor/entropy follow (consequences). `action_sat_frac` barely moves → NOT entropy-collapse-led. It's **value/critic instability at (or before) large returns**.
-4. **Why: our single `lr=1e-4` runs the actor/critic too hot.** DreamerV3 + SkyDreamer use a **split lr — world-model 1e-4, actor/critic 3e-5**. We apply 1e-4 to all three optimizers → the critic (3.3× too hot) diverges. The yaml comment literally says "paper splits wm=1e-4, ac=3e-5" — we didn't.
-5. **The late lr-anneal (26M) was the WRONG fix** — the critic can diverge at 8M (before any anneal). The robust fix is a **lower base actor/critic lr from the start.**
+2. **The real bottleneck is the COLLAPSE, not the ceiling.** Runs climb high then crash. Recurring.
+3. **LOG-DIAGNOSIS (06-30, zero-GPU, from banked TB scalars).** Pulled the curves at three collapse onsets and asked the council's question: *does the world model lead?* **No.** See `collapse_diagnosis.png` (3-panel). Findings:
+   - **World-model losses are DEAD FLAT in all three** (`wm/total`≈3.9, `wm/dyn_loss`≈3.8, `wm/rep_loss`, `wm/barlow` — sub-1% moves through every collapse). The "WM drift → bad imagined returns → critic chases" feedback-loop theory is **refuted**. WM is a bystander → skip all world-model fixes for the collapse.
+   - **Stabilizers ARE present and live** (not missing): `slow_target_fraction 0.02` = target-critic EMA; `return/scale` tag = ReturnEMA return-normalization (active, 26–1567). So this is not a dropped-stabilizer bug.
+   - **Three signatures, two families:**
+     - **ACTOR-led crater** (`2026-06-17_21-37-22` @29.4M, recoverable): `actor/entropy` collapses **1.0 → -3.0** (punches *through* its 1.0 floor) + `action_sat_frac` 0.17→0.30 (bang-bang) **lead** → value craters → `critic_loss` rises (follower) → barlow ticks up **last**. Root: actor over-sharpens; `entropy_floor_weight=1e-2` too weak to hold.
+     - **VALUE/RETURN runaway** (critic-led): mild = `2026-06-23` gold (value inflates 100→160, `critic_loss` *drops*, one transient dip→recovers); **severe/terminal** = `2026-06-28_00-17-01` (killed @11M): at ~7.1M `return/scale` **explodes 108→1567 (14×)**, `imag/value` 50→293 (raw max **802**), `critic_loss` 1.3→2.2, gates→0, policy entropy rises to 1.78 (actor loses all signal). ReturnEMA fails to contain the runaway.
+4. **Corrected root cause.** NOT "critic too hot diverges, actor follows" (the old §2a claim — true only for the terminal run). It's **two independent levers**: actor over-sharpening (recoverable crater) AND value/return over-estimation runaway (the terminal killer). The critic is a *follower* in the recoverable craters but genuinely *leads* the terminal divergence.
+5. **The late lr-anneal (26M) was the WRONG fix** — the value runaway hits at 7M (before any anneal). Robust fix is from-the-start.
 
-**RECOMMENDED NEXT RUN (not started): split the lr.** Keep wm lr 1e-4, set actor+critic lr to **3e-5**. Single conceptual change vs baseline. Code has `opt_wm`/`opt_actor`/`opt_critic` already — add `lr_actor`/`lr_critic` cfg fields (or reuse the new lr-anneal infra). This should stop the critic divergence and let it HOLD the ~40% peak instead of spiking-and-collapsing.
+**RECOMMENDED NEXT RUN (not started): split the lr + strengthen the entropy floor.**
+   - **Lower CRITIC lr 1e-4→3e-5** — directly damps the value/return runaway (the terminal killer; vindicated by `2026-06-28`). Each WM-side stays 1e-4.
+   - **Lower ACTOR lr 1e-4→3e-5 AND raise `entropy_floor_weight` 1e-2→~1e-1** — targets the actor-sharpening crater (entropy punched through the floor; the floor penalty is too weak).
+   - **Optional 2nd guard on the runaway:** clamp / faster-decay `return/scale`, or shorten `horizon=333` (long horizon = high-variance returns = easier to run away).
+   - Code has `opt_wm`/`opt_actor`/`opt_critic` already — add `lr_actor`/`lr_critic` cfg fields (default = `lr`, no-op).
 
-(A late lr anneal CLI exists from this session — `--lr_final/--lr_anneal_start/--lr_anneal_end`, commit `0bfc257`, disabled by default — but the data says split-from-the-start is the better lever.)
+(A late lr anneal CLI exists from this session — `--lr_final/--lr_anneal_start/--lr_anneal_end`, commit `0bfc257`, disabled by default — but the data says split-from-the-start + entropy floor are the levers. Council artifacts: `council-report-2026-06-30_01-50-05.html`.)
 
 ---
 
