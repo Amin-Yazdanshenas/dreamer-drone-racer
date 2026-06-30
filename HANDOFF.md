@@ -11,7 +11,9 @@
 
 ## 1. Current state (06-30: NOTHING training — GPU idle)
 
-No run active. Last run (`lr-anneal`, fresh baseline + late lr anneal, `2026-06-28_00-17-01`) was **killed at 11M — VALUE/RETURN RUNAWAY** (`return/scale` 108→1567, `imag/value` raw max **802**, gates→0, no recovery). 06-30 log-diagnosis: **world-model losses stay flat through every collapse** — not a WM problem; two collapse families (actor-sharpening + value runaway). See §2a + `collapse_diagnosis.png`.
+**ACTIVE run: `2026-06-30_04-07-04` — SPLIT-LR test** (remote pid 1032640, `~/train_splitlr.log`). Gold-baseline config + the ONLY change = actor/critic lr 1e-4→**3e-5** (wm stays 1e-4); `--seed 42`, max_steps 50M. Single-variable test of whether the split damps the collapse and lets it HOLD past ~36M. Watch `opt/lr_actor`/`opt/lr_critic`=3e-5, `return/scale` (terminal-runaway flag, blew to 1567 in `2026-06-28`), `imag/value`, `critic_loss`, `actor/entropy` (floor breach), gates/lap%.
+
+Prior: last run (`lr-anneal`, `2026-06-28_00-17-01`) was **killed at 11M — VALUE/RETURN RUNAWAY** (`return/scale` 108→1567, `imag/value` raw max **802**, gates→0, no recovery). 06-30 log-diagnosis: **world-model losses stay flat through every collapse** — not a WM problem; two collapse families (actor-sharpening + value runaway). See §2a + `collapse_diagnosis.png`.
 
 **Best policy = ~40% lap** (NOT 30% — see §2a): `2026-06-23_00-54-13/checkpoints/agent_best.pt` (smoothed 6.87 gates/ep, the exact-baseline run's peak before it collapsed).
 
