@@ -11,7 +11,7 @@
 
 ## 1. Current state (06-30: NOTHING training — GPU idle)
 
-**ACTIVE run: `2026-06-30_04-07-04` — SPLIT-LR test** (remote pid 1032640, `~/train_splitlr.log`). Gold-baseline config + the ONLY change = actor/critic lr 1e-4→**3e-5** (wm stays 1e-4); `--seed 42`, max_steps 50M. Single-variable test of whether the split damps the collapse and lets it HOLD past ~36M. Watch `opt/lr_actor`/`opt/lr_critic`=3e-5, `return/scale` (terminal-runaway flag, blew to 1567 in `2026-06-28`), `imag/value`, `critic_loss`, `actor/entropy` (floor breach), gates/lap%.
+**ACTIVE run: `2026-06-30_04-07-04` — SPLIT-LR test** (remote pid 1032640, `~/train_splitlr.log`). Gold-baseline config + the ONLY change = actor/critic lr 1e-4→**3e-5** (wm stays 1e-4); `--seed 42`, max_steps 50M. Single-variable test of whether the split damps the collapse. (Real gates: the ~7M terminal-runaway window — CLEARED 07-01, return/scale maxed 91 vs 1567 — and the ~29M actor-crater window. 36M is NOT a wall: gold was hand-stopped at 38M, not collapsed. Past ~38M is uncharted; this run's max_steps 50M will go there.) Watch `opt/lr_actor`/`opt/lr_critic`=3e-5, `return/scale` (terminal-runaway flag, blew to 1567 in `2026-06-28`), `imag/value`, `critic_loss`, `actor/entropy` (floor breach), gates/lap%.
 
 Prior: last run (`lr-anneal`, `2026-06-28_00-17-01`) was **killed at 11M — VALUE/RETURN RUNAWAY** (`return/scale` 108→1567, `imag/value` raw max **802**, gates→0, no recovery). 06-30 log-diagnosis: **world-model losses stay flat through every collapse** — not a WM problem; two collapse families (actor-sharpening + value runaway). See §2a + `collapse_diagnosis.png`.
 
@@ -52,7 +52,7 @@ Only the **env/training knobs** differ run-to-run; the model above is constant. 
 | 2026-06-22_00-36-12 (abl96) | 96 | 16 | 8 | flat | 10 N | [24-48] | 1.2M | stuck single-gate **~0.73**, never advanced |
 | 2026-06-22_10-51-05 (abl96b) | 96 | 16 | 8 | flat | 10 N | [24-80] | 1.2M | stuck single-gate **~0.72** |
 | 2026-06-22_17-37-15 (64+H80) | 64 | 16 | 8 | flat | 10 N | [24-80] | 2M | reverted to clean 64 baseline mid-run; see 06-23 run |
-| **2026-06-23_00-54-13** (EXACT baseline) | 64 | 16 | 8 | flat | 10 N | [24-48] | 2M | **★ reproduced AND spiked to ~40% lap @36M (mean 6.3), THEN COLLAPSED** to ~4% — `agent_best.pt` = the 40% peak |
+| **2026-06-23_00-54-13** (EXACT baseline) | 64 | 16 | 8 | flat | 10 N | [24-48] | 2M | **★ reproduced AND spiked to ~40% lap @36M (mean 6.3)**; transient dip @36.8M (→~4% one window) that RECOVERED, then **MANUALLY STOPPED @38M** (not a collapse) — `agent_best.pt` = the 40% peak |
 | 2026-06-28 (lr-anneal) | 64 | 16 | 8 | flat | 10 N | [24-48] | 2M | baseline + lr-anneal 1e-4→2e-5 @26-34M. **CRITIC DIVERGED @8-11M (value→502)**, killed. Anneal never engaged (too late). |
 
 **What the run log shows:** only **64px** runs ever chained well; **96px** stalled at single-gate ~0.72 (premature call — see note) → treat 96px as hurting for now. The 64px baseline is **reproducible to a ~40% peak** (higher than the 30% we were anchored to) but **collapses** after peaking. Don't bundle changes — single-variable tests vs the baseline only, and expect **±10pt run-to-run variance** (the exact peak isn't deterministic).
@@ -63,8 +63,8 @@ Only the **env/training knobs** differ run-to-run; the model above is constant. 
 
 ## 2a. THE KEY FINDING (06-27→30): ceiling ~40%; collapse = TWO families, WM not implicated
 
-1. **The ceiling is ~40% lap, not 30%.** The exact-baseline run (`2026-06-23`) spiked to **~40% lap / mean 6.3 / value ~153 at 36M** — beating the original's 30.7%. My 2M-windowed text reads smoothed this spike to "21%"; the 0.5M-bin graph + the `NEW BEST smoothed gates/ep=6.87` log line revealed it. **`agent_best.pt` from that run is the new best policy.**
-2. **The real bottleneck is the COLLAPSE, not the ceiling.** Runs climb high then crash. Recurring.
+1. **The ceiling is ~40% lap, not 30%.** The exact-baseline run (`2026-06-23`) spiked to **~40% lap / mean 6.3 / value ~153 at 36M** — beating the original's 30.7%. My 2M-windowed text reads smoothed this spike to "21%"; the 0.5M-bin graph + the `NEW BEST smoothed gates/ep=6.87` log line revealed it. **`agent_best.pt` from that run is the new best policy.** NOTE: gold's 36.8M "collapse to ~4%" was a **transient one-window dip that RECOVERED** (gates 6.8→1.9→7.2), and the run was **manually stopped at 38M** — NOT an intrinsic wall/collapse. "36M" is not a danger point; no run has been left to run past ~38M.
+2. **The genuine collapses are only TWO** (gold never truly crashed): the terminal value/return runaway (`2026-06-28`, @7M) and the recoverable actor-sharpening crater (`2026-06-17`, @29M, which itself recovered). Not "recurring crashes" — one lethal mode + one survivable dip.
 3. **LOG-DIAGNOSIS (06-30, zero-GPU, from banked TB scalars).** Pulled the curves at three collapse onsets and asked the council's question: *does the world model lead?* **No.** See `collapse_diagnosis.png` (3-panel). Findings:
    - **World-model losses are DEAD FLAT in all three** (`wm/total`≈3.9, `wm/dyn_loss`≈3.8, `wm/rep_loss`, `wm/barlow` — sub-1% moves through every collapse). The "WM drift → bad imagined returns → critic chases" feedback-loop theory is **refuted**. WM is a bystander → skip all world-model fixes for the collapse.
    - **Stabilizers ARE present and live** (not missing): `slow_target_fraction 0.02` = target-critic EMA; `return/scale` tag = ReturnEMA return-normalization (active, 26–1567). So this is not a dropped-stabilizer bug.
