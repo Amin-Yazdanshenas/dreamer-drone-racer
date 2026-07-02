@@ -1,6 +1,6 @@
 # Handoff — DreamerV3 Drone Racing
 
-**Last updated:** 2026-06-30
+**Last updated:** 2026-07-02
 **Repo:** `git@github.com:Amin-Yazdanshenas/dreamer-drone-racer.git`, branch `master`
 **Active agent:** R2-Dreamer — a **PyTorch** DreamerV3 variant (Barlow-Twins repr loss + informed/privileged 12-dim decoder, NO image-reconstruction, NO JAX). 256 envs.
 **Compute:** training runs on a REMOTE box `avl-super@100.117.154.65` (RTX 4090 24 GB VRAM, **62 GB host RAM**). The local machine is a 6 GB RTX 3060 laptop — too small for full training; only used for short headless evals/diagnostics.
@@ -9,7 +9,27 @@
 
 ---
 
-## 1. Current state (06-30: NOTHING training — GPU idle)
+## 0. TRAINING-UPDATE PROTOCOL — what to report when the user asks "how is training / check the training"
+
+Pull the active run's TB scalars (remote `event_accumulator`, `size_guidance={SCALARS:0}`) and report these, in this order. Keep it a scannable table, not prose.
+
+1. **Header:** run id, step (M), wall-clock uptime, alive?/GPU util, rate (M/hr) + ETA to next milestone.
+2. **SUCCESS-RATE BUCKETS (the headline).** `env/episode_gates` is **per-episode integer gate counts** (7 gates = 1 lap). Over the recent window (~last 5M steps) report the fraction of episodes with gates **≥2, ≥5, ≥7 (1 lap), ≥14 (2 laps)**, plus mean + max. This is the real "success rate," not gate_pass_rate (that's passes/step).
+3. **Peak** smoothed gates/ep so far + at what step.
+4. **COLLAPSE-FLAG PANEL** (current + max-so-far, with the kill thresholds):
+   - `return/scale` — terminal value/return runaway. Kill value was **1567** (`2026-06-28`). Healthy < ~100.
+   - `imag/value_mean` — value inflation. Kill value **802**. Healthy < ~100.
+   - `actor/entropy` — actor-sharpening. Floor is 1.0; **< -1 and falling = crater risk** (crater run hit -3).
+   - `actor/action_sat_frac` — bang-bang. **> 0.30 = danger** (normal ~0.10-0.15).
+   - `critic/loss` — follower; note if spiking.
+5. **Comparison:** vs gold at the matched step, and vs the **gold-peak target = 19.4% full-lap @36M** (mean 4.11). State whether on/above or below gold's trajectory.
+6. **Verdict + next gate:** on-track / watch / trigger. Real danger windows: **~7M** (terminal runaway — split-LR CLEARED) and **~29M** (actor crater). **36M is NOT a wall** — gold was hand-stopped @38M ([[gold-baseline-hand-stopped-not-walled]]); past ~38M is uncharted.
+
+Baseline success-rate references (fraction of episodes ≥N gates): gold PEAK[34-38M] mean 4.11 / ≥2:73% / ≥5:39% / ≥7:19.4% / ≥14:2.0%. crater[24-29M] 17.9% lap. Matched[15-20M]: split-LR mean 1.71 (≥5:5.4%, lap:0.8%) vs gold 1.49 (≥5:2.2%, lap:0.1%).
+
+---
+
+## 1. Current state (07-02: SPLIT-LR run TRAINING, ~20M, healthy)
 
 **ACTIVE run: `2026-06-30_04-07-04` — SPLIT-LR test** (remote pid 1032640, `~/train_splitlr.log`). Gold-baseline config + the ONLY change = actor/critic lr 1e-4→**3e-5** (wm stays 1e-4); `--seed 42`, max_steps 50M. Single-variable test of whether the split damps the collapse. (Real gates: the ~7M terminal-runaway window — CLEARED 07-01, return/scale maxed 91 vs 1567 — and the ~29M actor-crater window. 36M is NOT a wall: gold was hand-stopped at 38M, not collapsed. Past ~38M is uncharted; this run's max_steps 50M will go there.) Watch `opt/lr_actor`/`opt/lr_critic`=3e-5, `return/scale` (terminal-runaway flag, blew to 1567 in `2026-06-28`), `imag/value`, `critic_loss`, `actor/entropy` (floor breach), gates/lap%.
 
