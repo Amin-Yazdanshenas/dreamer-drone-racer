@@ -1,6 +1,6 @@
 # Handoff — DreamerV3 Drone Racing
 
-**Last updated:** 2026-07-02
+**Last updated:** 2026-07-06
 **Repo:** `git@github.com:Amin-Yazdanshenas/dreamer-drone-racer.git`, branch `master`
 **Active agent:** R2-Dreamer — a **PyTorch** DreamerV3 variant (Barlow-Twins repr loss + informed/privileged 12-dim decoder, NO image-reconstruction, NO JAX). 256 envs.
 **Compute:** training runs on a REMOTE box `avl-super@100.117.154.65` (RTX 4090 24 GB VRAM, **62 GB host RAM**). The local machine is a 6 GB RTX 3060 laptop — too small for full training; only used for short headless evals/diagnostics.
@@ -29,22 +29,24 @@ Baseline success-rate references (fraction of episodes ≥N gates): gold PEAK[34
 
 ---
 
-## 1. Current state (07-02: SPLIT-LR run TRAINING, ~20M, healthy)
+## 1. Current state (07-06: SPLIT-LR run FINISHED 50M — project-best on every axis; stability SOLVED)
 
-**ACTIVE run: `2026-06-30_04-07-04` — SPLIT-LR test** (remote pid 1032640, `~/train_splitlr.log`). Gold-baseline config + the ONLY change = actor/critic lr 1e-4→**3e-5** (wm stays 1e-4); `--seed 42`, max_steps 50M. Single-variable test of whether the split damps the collapse. (Real gates: the ~7M terminal-runaway window — CLEARED 07-01, return/scale maxed 91 vs 1567 — and the ~29M actor-crater window. 36M is NOT a wall: gold was hand-stopped at 38M, not collapsed. Past ~38M is uncharted; this run's max_steps 50M will go there.) Watch `opt/lr_actor`/`opt/lr_critic`=3e-5, `return/scale` (terminal-runaway flag, blew to 1567 in `2026-06-28`), `imag/value`, `critic_loss`, `actor/entropy` (floor breach), gates/lap%.
+**`2026-06-30_04-07-04` (SPLIT-LR) COMPLETED the full 50M cleanly** — zero collapses in 6d7h. Gold-baseline config + ONLY change = actor/critic lr 1e-4→**3e-5** (wm 1e-4), seed 42. Results:
+- **NEW BEST smoothed gates/ep = 9.325 @41.9M** (gold's all-time: 6.87) → `agent_best.pt` = **best policy of the project**.
+- **Peak window [41-42M]: 47.4% full-lap, 16.4% 2-lap** (gold peak: 19.4% / 2.0%). Max 19 gates ≈ 2.7 laps (episode-time capped at 20 s).
+- **Both collapse modes CLEARED**: ~7M terminal-runaway window (return/scale max 105 vs kill 1567) and ~29M actor-crater window (entropy stayed positive). >38M uncharted region: no cliff — oscillated 30-47% lap.
+- Post-peak (42→50M): slow **EROSION** to ~30% lap (drift/forgetting, flags all green — NOT a collapse; same pattern as the 06-13 run). Peak is banked in `agent_best.pt`.
+- **Conclusion: split-LR validated. Stability problem SOLVED. The remaining fight is the ~45% CEILING** (perception/reward co-design — gate-frame clips at 64px) **+ post-peak erosion** (candidate: late entropy-floor anneal, or freeze-and-stop at peak).
 
-Prior: last run (`lr-anneal`, `2026-06-28_00-17-01`) was **killed at 11M — VALUE/RETURN RUNAWAY** (`return/scale` 108→1567, `imag/value` raw max **802**, gates→0, no recovery). 06-30 log-diagnosis: **world-model losses stay flat through every collapse** — not a WM problem; two collapse families (actor-sharpening + value runaway). See §2a + `collapse_diagnosis.png`.
-
-**Best policy = ~40% lap** (NOT 30% — see §2a): `2026-06-23_00-54-13/checkpoints/agent_best.pt` (smoothed 6.87 gates/ep, the exact-baseline run's peak before it collapsed).
-
-**Next move (recommended, not yet started): SPLIT THE LR** — wm 1e-4, actor+critic **3e-5** (DreamerV3/SkyDreamer values). Our single `lr=1e-4` runs the actor/critic 3.3× too hot → critic diverges → spike-then-collapse. Code has 3 separate optimizers already.
+**07-06: 100-episode `--stochastic` eval of the new `agent_best.pt` LAUNCHED** (remote pid 1120529, `~/eval_splitlr_best.log`) → true deployment success-rate pending.
 
 ### Best checkpoints / fallbacks (all on remote)
 | Policy | Path | Note |
 |---|---|---|
-| **★ Best — ~40% lap** | `2026-06-23_00-54-13/checkpoints/agent_best.pt` | exact-baseline peak (smoothed 6.87 gates); beats the old 30% |
+| **★★ BEST — 9.33 smoothed, 47% lap peak** | `2026-06-30_04-07-04/checkpoints/agent_best.pt` | split-LR peak @41.9M |
+| split-LR final (eroded ~30%) | `2026-06-30_04-07-04/checkpoints/agent_final.pt` | end-state @50M |
+| prev best ~40% lap | `2026-06-23_00-54-13/checkpoints/agent_best.pt` | gold-baseline peak (6.87 smoothed) |
 | old 30% lap | `2026-06-13_21-29-13/checkpoints/agent_snapshot_36M.pt` | original peak; KEEP |
-| v2b ~18% peak | `2026-06-17_21-37-22/checkpoints/agent_best.pt` | 96px full-package (capped low) |
 
 ## 1a. Shared model (R2-Dreamer — constant across ALL runs below)
 
@@ -74,6 +76,7 @@ Only the **env/training knobs** differ run-to-run; the model above is constant. 
 | 2026-06-22_17-37-15 (64+H80) | 64 | 16 | 8 | flat | 10 N | [24-80] | 2M | reverted to clean 64 baseline mid-run; see 06-23 run |
 | **2026-06-23_00-54-13** (EXACT baseline) | 64 | 16 | 8 | flat | 10 N | [24-48] | 2M | **★ reproduced AND spiked to ~40% lap @36M (mean 6.3)**; transient dip @36.8M (→~4% one window) that RECOVERED, then **MANUALLY STOPPED @38M** (not a collapse) — `agent_best.pt` = the 40% peak |
 | 2026-06-28 (lr-anneal) | 64 | 16 | 8 | flat | 10 N | [24-48] | 2M | baseline + lr-anneal 1e-4→2e-5 @26-34M. **CRITIC DIVERGED @8-11M (value→502)**, killed. Anneal never engaged (too late). |
+| **2026-06-30_04-07-04 (SPLIT-LR)** | 64 | 16 | 8 | flat | 10 N | [24-48] | 2M | baseline + actor/critic lr **3e-5** (wm 1e-4), seed 42. **★★ COMPLETED 50M, zero collapses. NEW BEST 9.325 smoothed @41.9M; peak 47.4% lap / 16.4% 2-lap [41-42M]**; eroded to ~30% by 50M (drift, not collapse). |
 
 **What the run log shows:** only **64px** runs ever chained well; **96px** stalled at single-gate ~0.72 (premature call — see note) → treat 96px as hurting for now. The 64px baseline is **reproducible to a ~40% peak** (higher than the 30% we were anchored to) but **collapses** after peaking. Don't bundle changes — single-variable tests vs the baseline only, and expect **±10pt run-to-run variance** (the exact peak isn't deterministic).
 
