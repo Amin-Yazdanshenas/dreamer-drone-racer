@@ -142,6 +142,13 @@ class DreamerConfig:
     # < 0 => fall back to `lr` (no-op). warmup + lr_final anneal scale each base lr proportionally.
     lr_actor: float = -1.0
     lr_critic: float = -1.0
+    # Finetune-resume replay refill. The replay buffer is not checkpointed, so a resumed run
+    # starts buffer-empty and (by default) re-collects a RANDOM-action window — which then trains
+    # a converged policy on garbage (the 06-16 finetune regression). With policy_refill=True the
+    # refill window uses the restored policy's STOCHASTIC actions instead, and lasts refill_steps
+    # env-steps (updates stay gated off for the whole window either way).
+    policy_refill: bool = False
+    refill_steps: int = 500_000
     agc: float = 0.3
     pmin: float = 1e-3
     eps: float = 1e-20
@@ -542,6 +549,14 @@ class DreamerV3Agent:
             self.opt_wm.load_state_dict(ckpt["opt_wm"])
             self.opt_actor.load_state_dict(ckpt["opt_actor"])
             self.opt_critic.load_state_dict(ckpt["opt_critic"])
+            # load_state_dict restores param_groups["lr"] FROM THE CHECKPOINT, and with
+            # _update_count restored past warmup the scheduler block in update() never touches
+            # pg["lr"] again — so a resumed run would silently train at the checkpoint's lr,
+            # ignoring lr/lr_actor/lr_critic from THIS run's config. Re-assert the configured
+            # base lrs after restore.
+            for opt, base in self._opt_base_lrs:
+                for pg in opt.param_groups:
+                    pg["lr"] = base
         self._step = ckpt.get("step", 0)
         self._best_gates = ckpt.get("best_gates", 0.0)
         self._update_count = ckpt.get("update_count", 0)
@@ -606,9 +621,17 @@ class DreamerV3Agent:
         latent = self.rssm.get_feat(post_stoch, new_deter)
 
         if self._step < self._warmup_until_step:
-            # Random action during warmup. Carry the SAME action we return so prev_action in the
-            # next step matches what was actually applied to the environment.
-            action = (torch.rand(N, self.cfg.action_dim, device=self.device) * 2 - 1)
+            if self.cfg.policy_refill:
+                # Finetune-resume refill: act with the restored policy (stochastic) so the cold
+                # buffer refills with peak-policy data instead of random actions that a converged
+                # policy would then be trained against.
+                with torch.autocast(device_type=self._amp_device, dtype=self._amp_dtype):
+                    action, _ = self.actor(latent)
+                action = action.float()
+            else:
+                # Random action during warmup. Carry the SAME action we return so prev_action in
+                # the next step matches what was actually applied to the environment.
+                action = (torch.rand(N, self.cfg.action_dim, device=self.device) * 2 - 1)
         elif deterministic:
             with torch.autocast(device_type=self._amp_device, dtype=self._amp_dtype):
                 action = self.actor.act_deterministic(latent)

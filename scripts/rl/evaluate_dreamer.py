@@ -160,8 +160,20 @@ def main():
     # ----------------------------------------------------------------
     # Evaluation loop
     # ----------------------------------------------------------------
+    def _force_fresh_frame(obs):
+        """Refresh the camera image after a reset. At render_interval=100 the TiledCamera only
+        re-renders every ~8 control steps, so a freshly-reset episode otherwise starts on a STALE
+        image from the previous episode's dying frames — with a 1.5 m/s spawn velocity and a
+        3-step collision grace that produced an instant-death cluster (9/92 eval episodes dead
+        within 10 steps). Force a render, pull sensor buffers, and re-extract the obs."""
+        isaac = env._isaac
+        isaac.sim.render()
+        isaac.scene.update(dt=0.0)
+        obs.update(env._extract_obs())
+        return obs
+
     results = []
-    obs = env.reset()
+    obs = _force_fresh_frame(env.reset())
     ep_reward = 0.0
     ep_length = 0
     ep_gates = 0
@@ -204,7 +216,11 @@ def main():
             ep_gates = 0
             episodes_done += 1
 
-            obs = env.reset()
+            # NO explicit env.reset() here: Isaac Lab auto-resets in-step, so `obs` already IS
+            # the next episode's first frame (is_first=True — the wrapper sets it, and act()
+            # zeroes the RSSM latent from it). The old double-reset spawned each episode twice.
+            # Just refresh the stale camera frame for the new spawn and clear the action carry.
+            obs = _force_fresh_frame(obs)
             agent.reset_carry(env.num_envs)
 
     # ----------------------------------------------------------------

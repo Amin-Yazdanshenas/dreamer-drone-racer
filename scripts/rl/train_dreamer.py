@@ -97,6 +97,13 @@ parser.add_argument("--lr_actor", type=float, default=None,
 parser.add_argument("--lr_critic", type=float, default=None,
                     help="Split-LR: critic optimizer base LR (3e-5). Damps the value/return runaway (the "
                          "terminal collapse, see HANDOFF §2a). Default falls back to --lr/cfg.lr.")
+parser.add_argument("--finetune_refill", action="store_true", default=False,
+                    help="On --checkpoint resume, refill the (non-checkpointed) replay buffer with the "
+                         "restored policy's STOCHASTIC actions instead of random ones, for --refill_steps "
+                         "env-steps, before any gradient updates. Prevents the finetune regression from "
+                         "training a converged policy on random-action data.")
+parser.add_argument("--refill_steps", type=int, default=500_000,
+                    help="Length of the policy-refill window in env-steps (with --finetune_refill).")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -193,6 +200,9 @@ def _load_config(args) -> DreamerConfig:
         cfg.lr_critic = args.lr_critic
     if args.entropy_floor_weight is not None:
         cfg.entropy_floor_weight = args.entropy_floor_weight
+    if args.finetune_refill:
+        cfg.policy_refill = True
+        cfg.refill_steps = args.refill_steps
 
     cfg.obs_mode = args.obs_mode
     cfg.__post_init__()   # recompute image_channels from obs_mode
@@ -257,13 +267,19 @@ def main():
         agent.load(args_cli.checkpoint)
         print(f"[DreamerV3] Resumed from {args_cli.checkpoint}")
         # The replay buffer is NOT checkpointed (review R2), so a resumed run starts buffer-empty.
-        # Re-enter a random-action collection window of cfg.warmup_steps so the cold buffer
-        # refills with exploration diversity before on-policy updates resume, instead of
-        # immediately overfitting the resumed policy onto a thin fresh buffer.
-        agent._warmup_until_step = agent._step + cfg.warmup_steps
-        print(f"[DreamerV3] Resume: random-action buffer refill until env-step "
-              f"{agent._warmup_until_step:,} (buffer starts empty — not checkpointed).",
-              flush=True)
+        # Default: re-enter a random-action collection window of cfg.warmup_steps. With
+        # --finetune_refill: a longer window (cfg.refill_steps) collected by the restored policy's
+        # stochastic actions (see DreamerConfig.policy_refill) — random actions would feed a
+        # converged policy garbage data (the 06-16 finetune regression).
+        if cfg.policy_refill:
+            agent._warmup_until_step = agent._step + cfg.refill_steps
+            print(f"[DreamerV3] Resume: POLICY-refill (stochastic) until env-step "
+                  f"{agent._warmup_until_step:,} — no updates during the window.", flush=True)
+        else:
+            agent._warmup_until_step = agent._step + cfg.warmup_steps
+            print(f"[DreamerV3] Resume: random-action buffer refill until env-step "
+                  f"{agent._warmup_until_step:,} (buffer starts empty — not checkpointed).",
+                  flush=True)
 
     # ----------------------------------------------------------------
     # Logging
