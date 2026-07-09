@@ -38,7 +38,11 @@ Baseline success-rate references (fraction of episodes ≥N gates): gold PEAK[34
 - Post-peak (42→50M): slow **EROSION** to ~30% lap (drift/forgetting, flags all green — NOT a collapse; same pattern as the 06-13 run). Peak is banked in `agent_best.pt`.
 - **Conclusion: split-LR validated. Stability problem SOLVED. The remaining fight is the ~45% CEILING** (perception/reward co-design — gate-frame clips at 64px) **+ post-peak erosion** (candidate: late entropy-floor anneal, or freeze-and-stop at peak).
 
-**07-06: 100-episode `--stochastic` eval of the new `agent_best.pt` LAUNCHED** (remote pid 1120529, `~/eval_splitlr_best.log`) → true deployment success-rate pending.
+**07-06 eval** of `agent_best.pt` (92 eps, stochastic): **46.7% full-lap, mean 6.24 gates** — deployment matches the training peak. (Also found a 10% instant-death cluster from an eval-only stale-camera-frame bug, since fixed.)
+
+**07-08 EROSION-FIX RESUME (`2026-07-08_11-17-25`) — FALSIFIED, killed @46M.** Resumed `agent_best` (47%) with `entropy_floor_weight 1e-2→5e-2` + `--finetune_refill` + split-LR, testing whether a stronger entropy floor stops the post-peak erosion. It did NOT: policy settled to a ~34% lap band (~13pt below the 47% resume point) even though the floor held entropy at ~1.1. **Erosion is NOT entropy-driven — it's buffer/off-policy drift.** Mitigation = freeze-at-peak (`agent_best`), not entropy tweaks. See [[erosion-not-entropy-driven]]. Positive side-results: the resume-lr fix, `--finetune_refill` (policy refill — FIRST clean finetune-resume, held the policy vs 06-16's 30→19% regression), and the eval stale-frame fix all worked.
+
+**GPU idle. Next (per plan): oracle-mask ablation** — the ceiling attack. Now the confirmed bottleneck is the ~45-47% ceiling (perception/reward), not stability (solved) or erosion (banked via agent_best).
 
 ### Best checkpoints / fallbacks (all on remote)
 | Policy | Path | Note |
