@@ -104,6 +104,20 @@ parser.add_argument("--finetune_refill", action="store_true", default=False,
                          "training a converged policy on random-action data.")
 parser.add_argument("--refill_steps", type=int, default=500_000,
                     help="Length of the policy-refill window in env-steps (with --finetune_refill).")
+parser.add_argument("--actor_kl_beta", type=float, default=None,
+                    help="Finetune-resume KL-anchor: weight on KL(pi || pi_ref) where pi_ref is a frozen "
+                         "copy of the actor at checkpoint-load. Trust region against drifting off the "
+                         "resumed peak (07-08 erosion). Anneals to 0 over --actor_kl_anneal_steps. "
+                         "Only meaningful with --checkpoint.")
+parser.add_argument("--actor_kl_anneal_steps", type=int, default=None,
+                    help="Env-steps (after updates begin) over which the KL-anchor beta anneals to 0. "
+                         "Default 2M.")
+parser.add_argument("--freeze_actor_steps", type=int, default=None,
+                    help="Staged unfreeze: skip actor optimizer steps for the first N env-steps after "
+                         "updates begin (WM adapts to the fresh buffer first, actor last).")
+parser.add_argument("--freeze_critic_steps", type=int, default=None,
+                    help="Staged unfreeze: skip critic optimizer steps for the first N env-steps after "
+                         "updates begin.")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -203,6 +217,14 @@ def _load_config(args) -> DreamerConfig:
     if args.finetune_refill:
         cfg.policy_refill = True
         cfg.refill_steps = args.refill_steps
+    if args.actor_kl_beta is not None:
+        cfg.actor_kl_beta = args.actor_kl_beta
+    if args.actor_kl_anneal_steps is not None:
+        cfg.actor_kl_anneal_steps = args.actor_kl_anneal_steps
+    if args.freeze_actor_steps is not None:
+        cfg.freeze_actor_steps = args.freeze_actor_steps
+    if args.freeze_critic_steps is not None:
+        cfg.freeze_critic_steps = args.freeze_critic_steps
 
     cfg.obs_mode = args.obs_mode
     cfg.__post_init__()   # recompute image_channels from obs_mode

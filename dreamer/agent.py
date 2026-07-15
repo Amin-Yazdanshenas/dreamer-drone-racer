@@ -9,6 +9,7 @@ Replaces the old buggy custom DreamerV3 with R2-Dreamer's:
 
 from __future__ import annotations
 
+import copy
 import math
 import os
 from dataclasses import dataclass, field
@@ -149,6 +150,19 @@ class DreamerConfig:
     # env-steps (updates stay gated off for the whole window either way).
     policy_refill: bool = False
     refill_steps: int = 500_000
+    # Finetune-resume stabilizers (all no-ops by default). The 07-08 erosion-fix resume showed a
+    # free fine-tune of a converged policy drifts ~10pt below its resume point even with entropy
+    # held (erosion = buffer/off-policy drift, not entropy). Two counters:
+    # - actor_kl_beta > 0: anchor the actor with beta * KL(pi || pi_ref) where pi_ref is a frozen
+    #   copy of the actor taken at checkpoint-load. beta anneals linearly to 0 across
+    #   actor_kl_anneal_steps env-steps after updates begin, so the anchor releases gradually.
+    # - freeze_actor_steps / freeze_critic_steps: staged unfreeze — skip that optimizer's step for
+    #   the first N env-steps after updates begin (WM adapts to the refilled buffer first, critic
+    #   next, actor last).
+    actor_kl_beta: float = 0.0
+    actor_kl_anneal_steps: int = 2_000_000
+    freeze_actor_steps: int = 0
+    freeze_critic_steps: int = 0
     agc: float = 0.3
     pmin: float = 1e-3
     eps: float = 1e-20
@@ -259,6 +273,14 @@ class Actor(nn.Module):
         # Mode of the squashed Gaussian = tanh(mean). Matches the stochastic path's noise-free
         # action and can reach full ±1 authority (no inner mean-squash).
         return torch.tanh(mean)
+
+    def dist_params(self, latent: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """(mean, log_std) of the pre-tanh Gaussian. Used by the KL-anchor: KL between two
+        tanh-squashed policies equals the KL of their pre-tanh Normals (shared bijection)."""
+        out = self.net(latent)
+        mean, log_std = out.chunk(2, dim=-1)
+        log_std = log_std.clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
+        return mean, log_std
 
 
 class Critic(nn.Module):
@@ -446,6 +468,10 @@ class DreamerV3Agent:
         _scaler_enabled = (cfg.amp_dtype == "float16" and self.device.type == "cuda")
         self._scaler = torch.amp.GradScaler("cuda", enabled=_scaler_enabled)
 
+        # Frozen reference actor for the KL-anchor (populated in load() when
+        # cfg.actor_kl_beta > 0; None on fresh runs and un-anchored resumes).
+        self.ref_actor: Optional[Actor] = None
+
         # Internal carry: (stoch, deter, prev_action)
         self._carry: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None
 
@@ -560,6 +586,15 @@ class DreamerV3Agent:
         self._step = ckpt.get("step", 0)
         self._best_gates = ckpt.get("best_gates", 0.0)
         self._update_count = ckpt.get("update_count", 0)
+        if self.cfg.actor_kl_beta > 0:
+            # Snapshot the just-restored actor as the frozen KL-anchor reference. Not part of
+            # the checkpoint itself — it is reconstructed from the loaded weights on every
+            # anchored resume, so saving/loading stays unchanged.
+            self.ref_actor = copy.deepcopy(self.actor)
+            self.ref_actor.requires_grad_(False)
+            self.ref_actor.eval()
+            print(f"[R2-Dreamer] KL-anchor armed: beta={self.cfg.actor_kl_beta} "
+                  f"annealing to 0 over {self.cfg.actor_kl_anneal_steps:,} env-steps")
 
     # ------------------------------------------------------------------
     # Acting
@@ -709,6 +744,20 @@ class DreamerV3Agent:
         self._scaler.update()
 
         # -- Actor-critic update (imagination) --
+        # Staged unfreeze (finetune-resume stabilizer, no-op by default): skip the actor's /
+        # critic's optimizer step for the first freeze_*_steps env-steps after updates begin
+        # (updates begin at _warmup_until_step, so this composes with warmup AND refill). WM is
+        # never frozen — it must adapt to the fresh buffer first.
+        train_steps = self._step - self._warmup_until_step
+        actor_frozen = train_steps < self.cfg.freeze_actor_steps
+        critic_frozen = train_steps < self.cfg.freeze_critic_steps
+
+        if actor_frozen and critic_frozen:
+            # Nothing to step — skip the imagination rollout entirely (pure compute save).
+            wm_metrics["opt/actor_frozen"] = 1.0
+            wm_metrics["opt/critic_frozen"] = 1.0
+            return wm_metrics
+
         # post_stoch is (B, T, stoch, discrete); flatten the time/batch axes for parallel
         # imagination starts. Keep the (stoch, discrete) tail so the RSSM sees real categoricals.
         init_stoch = post_stoch.detach().reshape(B * T, self.cfg.stoch, self.cfg.discrete)
@@ -725,10 +774,18 @@ class DreamerV3Agent:
         self._scaler.unscale_(self.opt_critic)
         clip_grad_agc_(self.actor.parameters(), clip=self.cfg.agc, pmin=self.cfg.pmin)
         clip_grad_agc_(self.critic.parameters(), clip=self.cfg.agc, pmin=self.cfg.pmin)
-        self._scaler.step(self.opt_actor)
-        self._scaler.step(self.opt_critic)
+        if actor_frozen:
+            self.opt_actor.zero_grad(set_to_none=True)  # discard actor grads, weights untouched
+        else:
+            self._scaler.step(self.opt_actor)
+        if critic_frozen:
+            self.opt_critic.zero_grad(set_to_none=True)
+        else:
+            self._scaler.step(self.opt_critic)
         self._scaler.update()
 
+        ac_metrics["opt/actor_frozen"] = float(actor_frozen)
+        ac_metrics["opt/critic_frozen"] = float(critic_frozen)
         return {**wm_metrics, **ac_metrics}
 
     def _world_model_loss(self, data: Dict[str, torch.Tensor], B: int, T: int):
@@ -952,6 +1009,31 @@ class DreamerV3Agent:
         actor_value = (w_flat * targets_norm.reshape(HH * B2)).sum() / w_sum
         actor_loss = -actor_value - self.cfg.entropy_scale * entropy + self.cfg.entropy_floor_weight * floor_pen
 
+        # KL-anchor (finetune-resume stabilizer): beta * KL(pi || pi_ref) on the imagined
+        # departure states, pi_ref = frozen copy of the actor at checkpoint-load. Keeps the
+        # fine-tuned policy in a trust region around the known-good resumed policy instead of
+        # free-drifting off the peak (the 07-08 erosion mechanism). KL of two tanh-squashed
+        # Gaussians == KL of their pre-tanh Normals (shared bijection), closed form for
+        # diagonal Gaussians. dep_flat is detached: the anchor shapes the policy mapping only,
+        # not the imagined dynamics. beta anneals linearly to 0 across actor_kl_anneal_steps
+        # env-steps after updates begin, releasing the anchor gradually.
+        kl_ref_val, kl_beta_eff = 0.0, 0.0
+        if self.ref_actor is not None and self.cfg.actor_kl_beta > 0:
+            prog = (self._step - self._warmup_until_step) / max(1, self.cfg.actor_kl_anneal_steps)
+            kl_beta_eff = self.cfg.actor_kl_beta * max(0.0, 1.0 - prog)
+            if kl_beta_eff > 0:
+                dep_sg = dep_flat.detach()
+                mean_p, log_std_p = self.actor.dist_params(dep_sg)
+                with torch.no_grad():
+                    mean_r, log_std_r = self.ref_actor.dist_params(dep_sg)
+                var_p = (2.0 * log_std_p).exp()
+                var_r = (2.0 * log_std_r).exp()
+                kl = (log_std_r - log_std_p
+                      + (var_p + (mean_p - mean_r) ** 2) / (2.0 * var_r) - 0.5).sum(-1)
+                kl_mean = (w_flat * kl).sum() / w_sum
+                actor_loss = actor_loss + kl_beta_eff * kl_mean
+                kl_ref_val = kl_mean.item()
+
         # Critic loss: weighted twohot regression of V(s_0..s_{H-1}) onto detached lambda targets.
         crit_loss = self.critic.loss(dep_flat.detach(), targets.detach().reshape(HH * B2),
                                      weight=w_flat.detach())
@@ -983,6 +1065,8 @@ class DreamerV3Agent:
             "actor/entropy": entropy.item(),
             "actor/floor_pen": floor_pen.item(),
             "actor/entropy_min_eff": float(eff_entropy_min),
+            "actor/kl_ref": kl_ref_val,
+            "actor/kl_beta": kl_beta_eff,
             "actor/action_abs_mean": action_abs_mean.item(),
             "actor/action_sat_frac": action_sat_frac.item(),
             "critic/loss": crit_loss.item(),
