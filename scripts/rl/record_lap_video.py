@@ -86,6 +86,31 @@ _MODE = {
 
 CTRL_DT = 0.03  # decimation 12 x sim dt 1/400
 
+# Viewer-camera model for the trail overlay: Kit's default perspective camera is
+# focal 18.14756 mm on a 20.955 mm horizontal aperture -> HFOV ~= 60 deg. Square pixels.
+def _make_projector(eye, lookat, width, height):
+    """Return world->pixel projector for the overview viewer camera (pinhole, HFOV~60deg)."""
+    eye = np.asarray(eye, dtype=np.float64)
+    fwd = np.asarray(lookat, dtype=np.float64) - eye
+    fwd /= np.linalg.norm(fwd)
+    up = np.array([0.0, 0.0, 1.0])
+    right = np.cross(fwd, up); right /= np.linalg.norm(right)
+    upv = np.cross(right, fwd)
+    hfov = 2.0 * np.arctan(20.955 / (2.0 * 18.14756))
+    fx = (width / 2.0) / np.tan(hfov / 2.0)
+    cx, cy = width / 2.0, height / 2.0
+
+    def project(p):
+        d = np.asarray(p, dtype=np.float64) - eye
+        z = float(d @ fwd)
+        if z <= 0.1:
+            return None
+        u = cx + fx * float(d @ right) / z
+        v = cy - fx * float(d @ upv) / z
+        return (u, v)
+
+    return project
+
 
 def _load_cfg():
     import yaml
@@ -100,14 +125,29 @@ def _load_cfg():
     return cfg
 
 
-def _compose(view: np.ndarray, fpv_rgb: np.ndarray, gates: int, min_gates: int, t_s: float) -> np.ndarray:
-    """[viewport | FPV panel] -> single BGR frame. All dims even for yuv420p."""
+def _compose(view: np.ndarray, fpv_rgb: np.ndarray, gates: int, min_gates: int, t_s: float,
+             trail_px=None) -> np.ndarray:
+    """[viewport+trail | FPV panel] -> single BGR frame. All dims even for yuv420p."""
     s = args_cli.fpv_size
     vh = max(576, s + 64)
     vh += vh % 2
     vw = int(round(view.shape[1] * vh / view.shape[0]))
     vw += vw % 2
     main = cv2.resize(cv2.cvtColor(view, cv2.COLOR_RGB2BGR), (vw, vh), interpolation=cv2.INTER_AREA)
+
+    # Trail: fading polyline of the drone's path, projected into the viewer camera.
+    # trail_px is in NATIVE view pixels -> scale to the resized main panel.
+    if trail_px and len(trail_px) >= 2:
+        sx, sy = vw / view.shape[1], vh / view.shape[0]
+        pts = [(int(round(u * sx)), int(round(v * sy))) for (u, v) in trail_px]
+        n = len(pts)
+        overlay = main.copy()
+        for i in range(1, n):
+            age = i / n                                   # 0 = oldest, 1 = newest
+            color = (0, int(140 + 100 * age), int(255 * age))   # BGR: orange->yellow-ish fade
+            cv2.line(overlay, pts[i - 1], pts[i], color, 2 if age > 0.7 else 1, cv2.LINE_AA)
+        main = cv2.addWeighted(overlay, 0.75, main, 0.25, 0)
+        cv2.circle(main, pts[-1], 4, (0, 255, 255), -1, cv2.LINE_AA)  # current position dot
 
     panel = np.zeros((vh, s, 3), dtype=np.uint8)
     fpv = cv2.resize(cv2.cvtColor(fpv_rgb, cv2.COLOR_RGB2BGR), (s, s), interpolation=cv2.INTER_NEAREST)
@@ -153,10 +193,13 @@ def main():
 
     isaac = env._isaac
     cam = isaac.scene["tiled_camera"]
+    robot = isaac.scene["robot"]
+    projector = None  # built lazily from the first rendered frame's true resolution
 
     obs = env.reset()
     cached_img = obs["image"].clone()
     frames: list = []
+    trail_px: list = []
     ep_gates, ep_steps, episodes_done = 0, 0, 0
     print(f"[record_lap] hunting for a >={args_cli.min_gates}-gate episode "
           f"(max {args_cli.max_episodes} episodes) ...", flush=True)
@@ -177,7 +220,15 @@ def main():
 
         view = gym_env.render()                                   # (H, W, 3) uint8 RGB
         fpv = _to_rgb_u8(cam.data.output.get("rgb"))[0].numpy()   # (64, 64, 3) uint8
-        frames.append(_compose(view, fpv, ep_gates, args_cli.min_gates, ep_steps * CTRL_DT))
+        if projector is None:
+            projector = _make_projector(env_cfg.viewer.eye, env_cfg.viewer.lookat,
+                                        view.shape[1], view.shape[0])
+        pos = robot.data.root_pos_w[0].detach().cpu().numpy()
+        px = projector(pos)
+        if px is not None:
+            trail_px.append(px)
+        frames.append(_compose(view, fpv, ep_gates, args_cli.min_gates, ep_steps * CTRL_DT,
+                               trail_px=trail_px))
 
         if bool(obs["is_last"].any()):
             episodes_done += 1
@@ -185,11 +236,15 @@ def main():
                 print(f"[record_lap] SUCCESS: episode {episodes_done} passed {ep_gates} gates "
                       f"in {ep_steps * CTRL_DT:.1f}s — writing video", flush=True)
                 _write_mp4(frames, args_cli.out, args_cli.fps)
+                # Alignment-check still: mid-episode frame for eyeballing the trail projection.
+                cv2.imwrite(os.path.splitext(args_cli.out)[0] + "_check.png",
+                            frames[len(frames) // 2])
                 print(f"[record_lap] wrote {args_cli.out}  ({len(frames)} frames @ {args_cli.fps} fps)",
                       flush=True)
                 return
             print(f"[record_lap] episode {episodes_done}: {ep_gates} gates — discarding", flush=True)
             frames.clear()
+            trail_px.clear()
             ep_gates, ep_steps = 0, 0
             agent.reset_carry(env.num_envs)
 
