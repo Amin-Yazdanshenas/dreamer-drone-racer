@@ -41,6 +41,9 @@ parser.add_argument("--num_envs", type=int, default=4)
 parser.add_argument("--modes", type=str, default="both", choices=["stochastic", "deterministic", "both"])
 parser.add_argument("--near_gate_m", type=float, default=2.5,
                     help="Death within this distance of the target gate counts as gate-related.")
+parser.add_argument("--approach_steps", type=int, default=40,
+                    help="Rolling per-step approach buffer length (40 x 0.03 s = 1.2 s) dumped at "
+                         "every gate pass / gate-frame clip into approaches.csv.")
 parser.add_argument("--out_dir", type=str, required=True)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -102,6 +105,21 @@ def _quat_conj_rotate(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     return v + w.unsqueeze(-1) * t + torch.cross(qv, t, dim=-1)
 
 
+def _quat_rotate(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Rotate vector v from local frame to world by quaternion q (wxyz), batched."""
+    w = q[..., 0:1]
+    qv = q[..., 1:4]
+    t = 2.0 * torch.cross(qv, v, dim=-1)
+    return v + w * t + torch.cross(qv, t, dim=-1)
+
+
+def _angle_deg(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Angle (deg) between batched vectors."""
+    an = a / a.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    bn = b / b.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    return torch.rad2deg(torch.acos((an * bn).sum(-1).clamp(-1.0, 1.0)))
+
+
 def _term_fired(isaac, name: str) -> torch.Tensor:
     """Per-env bool: did termination term `name` fire this step. Defensive across API versions."""
     tm = isaac.termination_manager
@@ -136,10 +154,13 @@ def _overlap_frac(seg: torch.Tensor, isaac, command_name: str) -> np.ndarray:
 
 
 def run_mode(env, agent, isaac, cam, cmd, mode: str, writers, n_episodes: int):
+    from collections import deque
     N = env.num_envs
     deterministic = mode == "deterministic"
     agent.reset_carry(N)
     obs = env.reset()
+    approach_buf = [deque(maxlen=args_cli.approach_steps) for _ in range(N)]
+    event_ctr = [0] * N
 
     # per-env episode state
     ep_len = np.zeros(N, dtype=int)
@@ -164,7 +185,20 @@ def run_mode(env, agent, isaac, cam, cmd, mode: str, writers, n_episodes: int):
     acc = {b: [0, 0.0, 0.0] for b in ("near", "far")}  # count, std_sum, ent_sum
 
     episodes_done = 0
-    crossings_w, episodes_w, _ = writers
+    crossings_w, episodes_w, _, approaches_w = writers
+
+    def dump_approach(i: int, gate: int, outcome: str):
+        """Write the rolling buffer rows belonging to THIS gate approach, t=0 at the event."""
+        rows = [r for r in approach_buf[i] if r[0] == gate]
+        if not rows:
+            return
+        event_ctr[i] += 1
+        eid = f"{mode[:4]}_{i}_{event_ctr[i]}"
+        n = len(rows)
+        for k, r in enumerate(rows):
+            approaches_w.writerow([mode, eid, i, gate, outcome, k - (n - 1),
+                                   f"{(k - (n - 1)) * CTRL_DT:.3f}"]
+                                  + [f"{v:.4f}" if isinstance(v, float) else v for v in r[1:]])
 
     while episodes_done < n_episodes and simulation_app.is_running():
         with torch.no_grad():
@@ -175,6 +209,9 @@ def run_mode(env, agent, isaac, cam, cmd, mode: str, writers, n_episodes: int):
             mean, log_std = agent.actor.dist_params(latent.to(agent.device))
             std_now = log_std.exp().mean(-1).float().cpu().numpy()
             ent_now = (log_std.sum(-1) + _GAUSS_ENT * mean.shape[-1]).float().cpu().numpy()
+            act_mean_np = torch.tanh(mean).float().cpu().numpy()      # (N, 4) deterministic action
+            act_exec_np = action.float().cpu().numpy()                # (N, 4) executed action
+            std_dims_np = log_std.exp().float().cpu().numpy()         # (N, 4)
 
         # ---- pre-step snapshot of alive state ----
         robot = isaac.scene["robot"]
@@ -205,6 +242,29 @@ def run_mode(env, agent, isaac, cam, cmd, mode: str, writers, n_episodes: int):
             if len(overlap_hist[i]) > 10:
                 overlap_hist[i].pop(0)
 
+        # ---- approach geometry (for the rolling last-~1s buffer) ----
+        quat_w = robot.data.root_quat_w.detach().cpu()
+        fwd_local = torch.zeros(N, 3); fwd_local[:, 0] = 1.0
+        drone_fwd = _quat_rotate(quat_w, fwd_local)                 # body +x in world
+        gate_norm = _quat_rotate(gate_quat, fwd_local)              # gate through-axis in world
+        to_gate = gate_pos - pos_w
+        head_err = _angle_deg(drone_fwd, gate_norm).numpy()         # alignment w/ through-axis
+        bear_err = _angle_deg(drone_fwd, to_gate).numpy()           # is nose pointing at gate
+        vel_err = _angle_deg(vel_w, gate_norm).numpy()              # velocity vs through-axis
+        rel_v = _quat_conj_rotate(gate_quat, vel_w)                 # velocity in gate frame
+        for i in range(N):
+            approach_buf[i].append((
+                int(snap_gate_idx[i]), float(snap_dist[i]), float(snap_lat[i]), float(snap_vert[i]),
+                float(rel[i, 0]), float(snap_speed[i]), float(rel_v[i, 0]), float(rel_v[i, 1]),
+                float(rel_v[i, 2]), float(head_err[i]), float(bear_err[i]), float(vel_err[i]),
+                float(act_mean_np[i, 0]), float(act_mean_np[i, 1]), float(act_mean_np[i, 2]),
+                float(act_mean_np[i, 3]), float(act_exec_np[i, 0]), float(act_exec_np[i, 1]),
+                float(act_exec_np[i, 2]), float(act_exec_np[i, 3]),
+                float(np.abs(act_exec_np[i] - act_mean_np[i]).mean()),   # realized noise magnitude
+                float(std_now[i]), float(std_dims_np[i].max()), float(ent_now[i]),
+                int(img_age), float(vdt[i]), float(ov[i]),
+            ))
+
         obs = env.step(action.cpu())
         ep_len += 1
         # camera refresh detection (cheap signature on one pixel row of env 0)
@@ -227,6 +287,7 @@ def run_mode(env, agent, isaac, cam, cmd, mode: str, writers, n_episodes: int):
         for i in range(N):
             if passed[i]:
                 ep_gates[i] += 1
+                dump_approach(i, int(snap_gate_idx[i]), "pass")
                 crossings_w.writerow([mode, episodes_done, i, int(snap_gate_idx[i]),
                                       f"{snap_lat[i]:.4f}", f"{snap_vert[i]:.4f}",
                                       f"{np.hypot(snap_lat[i], snap_vert[i]):.4f}",
@@ -245,6 +306,8 @@ def run_mode(env, agent, isaac, cam, cmd, mode: str, writers, n_episodes: int):
                     end = "timeout"
                 near = bool(snap_dist[i] < args_cli.near_gate_m)
                 ground = bool(snap_pos[i, 2] < 0.15)
+                if end == "collision" and near:
+                    dump_approach(i, int(snap_gate_idx[i]), "clip")
                 episodes_w.writerow([mode, episodes_done, i, int(ep_len[i]), int(ep_gates[i]),
                                      int(spawn_gate[i]), end, int(snap_gate_idx[i]),
                                      f"{snap_dist[i]:.3f}", f"{snap_lat[i]:.4f}", f"{snap_vert[i]:.4f}",
@@ -255,6 +318,7 @@ def run_mode(env, agent, isaac, cam, cmd, mode: str, writers, n_episodes: int):
                 ep_len[i] = 0
                 ep_gates[i] = 0
                 overlap_hist[i].clear()
+                approach_buf[i].clear()
                 spawn_gate[i] = int(cmd.next_gate_idx[i].item())
                 if episodes_done % 25 == 0:
                     print(f"[diag] {mode}: {episodes_done}/{n_episodes} episodes", flush=True)
@@ -283,9 +347,18 @@ def main():
     fc = open(os.path.join(args_cli.out_dir, "crossings.csv"), "w", newline="")
     fe = open(os.path.join(args_cli.out_dir, "episodes.csv"), "w", newline="")
     fs = open(os.path.join(args_cli.out_dir, "stepstats.csv"), "w", newline="")
+    fa = open(os.path.join(args_cli.out_dir, "approaches.csv"), "w", newline="")
     crossings_w = csv.writer(fc)
     episodes_w = csv.writer(fe)
     stepstats_w = csv.writer(fs)
+    approaches_w = csv.writer(fa)
+    approaches_w.writerow(["mode", "event_id", "env", "gate_idx", "outcome", "t_steps", "t_sec",
+                           "dist_m", "lat_m", "vert_m", "along_m", "speed_mps",
+                           "v_along", "v_lat", "v_vert", "head_err_deg", "bearing_err_deg",
+                           "vel_align_deg", "am0", "am1", "am2", "am3",
+                           "ax0", "ax1", "ax2", "ax3", "noise_mag",
+                           "act_std", "act_std_max", "pretanh_ent", "img_age_steps", "vdt_m",
+                           "overlap_frac"])
     crossings_w.writerow(["mode", "ep_ctr", "env", "gate_idx", "lat_m", "vert_m", "radial_m",
                           "img_age_steps", "vdt_m", "overlap", "act_std", "pretanh_ent", "speed_mps"])
     episodes_w.writerow(["mode", "ep_ctr", "env", "len_steps", "gates", "spawn_gate", "end_type",
@@ -298,13 +371,13 @@ def main():
     for mode in modes:
         print(f"[diag] === mode: {mode} ({args_cli.num_episodes} episodes) ===", flush=True)
         acc = run_mode(env, agent, isaac, cam, cmd, mode,
-                       (crossings_w, episodes_w, stepstats_w), args_cli.num_episodes)
+                       (crossings_w, episodes_w, stepstats_w, approaches_w), args_cli.num_episodes)
         for b, (n, ssum, esum) in acc.items():
             stepstats_w.writerow([mode, b, n, f"{ssum:.4f}", f"{esum:.4f}"])
-        fc.flush(); fe.flush(); fs.flush()
+        fc.flush(); fe.flush(); fs.flush(); fa.flush()
 
-    fc.close(); fe.close(); fs.close()
-    print(f"[diag] DONE — wrote crossings.csv / episodes.csv / stepstats.csv to {args_cli.out_dir}",
+    fc.close(); fe.close(); fs.close(); fa.close()
+    print(f"[diag] DONE — wrote crossings/episodes/stepstats/approaches.csv to {args_cli.out_dir}",
           flush=True)
 
 
